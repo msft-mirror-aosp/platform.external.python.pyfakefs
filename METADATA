@@ -15,5 +15,6 @@ third_party {
     value: "https://github.com/jmcgeheeiv/pyfakefs.git"
   }
   version: "v3.7"
+  license_type: NOTICE
   last_upgrade_date { year: 2019 month: 12 day: 18 }
 }
