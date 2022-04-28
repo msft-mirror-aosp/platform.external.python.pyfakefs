@@ -10,8 +10,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Used as SUT for pytest_fixture_test.py
+"""Used for testing suppression of deprecation warnings while iterating
+over modules. The code is modeled after code in xmlbuilder.py in Python 3.6.
+See issue #542.
+"""
+import warnings
 
-from pathlib import Path
 
-EXAMPLE_FILE = Path('/test') / 'file'
+class DeprecatedProperty:
+
+    def __get__(self, instance, cls):
+        warnings.warn("async is deprecated", DeprecationWarning)
+        warnings.warn("async will be replaced", FutureWarning)
+        return instance
+
+
+class DeprecationTest:
+    locals()['async'] = DeprecatedProperty()
