@@ -10,8 +10,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Used as SUT for pytest_fixture_test.py
+"""
+Example module that is used for a regression test where a module with
+a name ending with "io" was skipped from patching (see #569).
+"""
 
-from pathlib import Path
 
-EXAMPLE_FILE = Path('/test') / 'file'
+def file_contents(path):
+    """Return the contents of the given path as byte array."""
+    with open(path, 'rb') as f:
+        return f.read()
