@@ -12,6 +12,14 @@
 
 # Used as SUT for pytest_fixture_test.py
 
-from pathlib import Path
+try:
+    from pathlib2 import Path
 
-EXAMPLE_FILE = Path('/test') / 'file'
+    EXAMPLE_FILE = Path('/test') / 'file'
+except ImportError:
+    try:
+        from pathlib import Path
+
+        EXAMPLE_FILE = Path('/test') / 'file'
+    except ImportError:
+        EXAMPLE_FILE = None

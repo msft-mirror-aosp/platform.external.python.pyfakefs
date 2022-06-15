@@ -20,18 +20,19 @@ import errno
 import os
 import stat
 import sys
+import time
 import unittest
 
 from pyfakefs import fake_filesystem
 from pyfakefs.fake_filesystem import set_uid, set_gid, is_root, reset_ids
 from pyfakefs.helpers import IS_WIN
-from pyfakefs.tests.test_utils import TestCase, RealFsTestCase, time_mock
+from pyfakefs.tests.test_utils import DummyTime, TestCase
 
 
 class FakeDirectoryUnitTest(TestCase):
     def setUp(self):
-        self.time = time_mock(10, 1)
-        self.time.start()
+        self.orig_time = time.time
+        time.time = DummyTime(10, 1)
         self.filesystem = fake_filesystem.FakeFilesystem(path_separator='/')
         self.os = fake_filesystem.FakeOsModule(self.filesystem)
         self.fake_file = fake_filesystem.FakeFile(
@@ -40,18 +41,17 @@ class FakeDirectoryUnitTest(TestCase):
             'somedir', filesystem=self.filesystem)
 
     def tearDown(self):
-        self.time.stop()
+        time.time = self.orig_time
 
     def test_new_file_and_directory(self):
         self.assertTrue(stat.S_IFREG & self.fake_file.st_mode)
         self.assertTrue(stat.S_IFDIR & self.fake_dir.st_mode)
-        self.assertEqual({}, self.fake_dir.entries)
-        self.assertEqual(12, self.fake_file.st_ctime)
+        self.assertEqual({}, self.fake_dir.contents)
+        self.assertEqual(10, self.fake_file.st_ctime)
 
     def test_add_entry(self):
         self.fake_dir.add_entry(self.fake_file)
-        self.assertEqual({'foobar': self.fake_file},
-                         self.fake_dir.entries)
+        self.assertEqual({'foobar': self.fake_file}, self.fake_dir.contents)
 
     def test_get_entry(self):
         self.fake_dir.add_entry(self.fake_file)
@@ -89,16 +89,19 @@ class FakeDirectoryUnitTest(TestCase):
         self.fake_dir.add_entry(self.fake_file)
         self.assertEqual(self.fake_file, self.fake_dir.get_entry('foobar'))
         self.fake_dir.remove_entry('foobar')
-        with self.assertRaises(KeyError):
-            self.fake_dir.get_entry('foobar')
+        self.assertRaises(KeyError, self.fake_dir.get_entry, 'foobar')
 
     def test_should_throw_if_set_size_is_not_integer(self):
-        with self.raises_os_error(errno.ENOSPC):
+        def set_size():
             self.fake_file.size = 0.1
 
+        self.assert_raises_os_error(errno.ENOSPC, set_size)
+
     def test_should_throw_if_set_size_is_negative(self):
-        with self.raises_os_error(errno.ENOSPC):
+        def set_size():
             self.fake_file.size = -1
+
+        self.assert_raises_os_error(errno.ENOSPC, set_size)
 
     def test_produce_empty_file_if_set_size_is_zero(self):
         self.fake_file.size = 0
@@ -119,18 +122,18 @@ class FakeDirectoryUnitTest(TestCase):
     def test_set_contents_to_dir_raises(self):
         # Regression test for #276
         self.filesystem.is_windows_fs = True
-        with self.raises_os_error(errno.EISDIR):
-            self.fake_dir.set_contents('a')
+        self.assert_raises_os_error(
+            errno.EISDIR, self.fake_dir.set_contents, 'a')
         self.filesystem.is_windows_fs = False
-        with self.raises_os_error(errno.EISDIR):
-            self.fake_dir.set_contents('a')
+        self.assert_raises_os_error(
+            errno.EISDIR, self.fake_dir.set_contents, 'a')
 
     def test_pads_with_nullbytes_if_size_is_greater_than_current_size(self):
         self.fake_file.size = 13
         self.assertEqual('dummy_file\0\0\0', self.fake_file.contents)
 
     def test_set_m_time(self):
-        self.assertEqual(12, self.fake_file.st_mtime)
+        self.assertEqual(10, self.fake_file.st_mtime)
         self.fake_file.st_mtime = 13
         self.assertEqual(13, self.fake_file.st_mtime)
         self.fake_file.st_mtime = 131
@@ -176,12 +179,12 @@ class SetLargeFileSizeTest(TestCase):
                                                   filesystem=filesystem)
 
     def test_should_throw_if_size_is_not_integer(self):
-        with self.raises_os_error(errno.ENOSPC):
-            self.fake_file.set_large_file_size(0.1)
+        self.assert_raises_os_error(errno.ENOSPC,
+                                    self.fake_file.set_large_file_size, 0.1)
 
     def test_should_throw_if_size_is_negative(self):
-        with self.raises_os_error(errno.ENOSPC):
-            self.fake_file.set_large_file_size(-1)
+        self.assert_raises_os_error(errno.ENOSPC,
+                                    self.fake_file.set_large_file_size, -1)
 
     def test_sets_content_none_if_size_is_non_negative_integer(self):
         self.fake_file.set_large_file_size(1000000000)
@@ -262,11 +265,10 @@ class FakeFilesystemUnitTest(TestCase):
         self.assertEqual('/', self.filesystem.path_separator)
         self.assertTrue(stat.S_IFDIR & self.filesystem.root.st_mode)
         self.assertEqual(self.root_name, self.filesystem.root.name)
-        self.assertEqual({}, self.filesystem.root.entries)
+        self.assertEqual({}, self.filesystem.root.contents)
 
     def test_none_raises_type_error(self):
-        with self.assertRaises(TypeError):
-            self.filesystem.exists(None)
+        self.assertRaises(TypeError, self.filesystem.exists, None)
 
     def test_empty_string_does_not_exist(self):
         self.assertFalse(self.filesystem.exists(''))
@@ -290,7 +292,7 @@ class FakeFilesystemUnitTest(TestCase):
     def test_add_object_to_root(self):
         self.filesystem.add_object(self.root_name, self.fake_file)
         self.assertEqual({'foobar': self.fake_file},
-                         self.filesystem.root.entries)
+                         self.filesystem.root.contents)
 
     def test_exists_added_file(self):
         self.filesystem.add_object(self.root_name, self.fake_file)
@@ -336,18 +338,18 @@ class FakeFilesystemUnitTest(TestCase):
     def test_get_nonexistent_object_from_root_error(self):
         self.filesystem.add_object(self.root_name, self.fake_file)
         self.assertEqual(self.fake_file, self.filesystem.get_object('foobar'))
-        with self.raises_os_error(errno.ENOENT):
-            self.filesystem.get_object('some_bogus_filename')
+        self.assert_raises_os_error(
+            errno.ENOENT, self.filesystem.get_object, 'some_bogus_filename')
 
     def test_remove_object_from_root(self):
         self.filesystem.add_object(self.root_name, self.fake_file)
         self.filesystem.remove_object(self.fake_file.name)
-        with self.raises_os_error(errno.ENOENT):
-            self.filesystem.get_object(self.fake_file.name)
+        self.assert_raises_os_error(
+            errno.ENOENT, self.filesystem.get_object, self.fake_file.name)
 
     def test_remove_nonexisten_object_from_root_error(self):
-        with self.raises_os_error(errno.ENOENT):
-            self.filesystem.remove_object('some_bogus_filename')
+        self.assert_raises_os_error(
+            errno.ENOENT, self.filesystem.remove_object, 'some_bogus_filename')
 
     def test_exists_removed_file(self):
         self.filesystem.add_object(self.root_name, self.fake_file)
@@ -359,19 +361,21 @@ class FakeFilesystemUnitTest(TestCase):
         self.filesystem.add_object(self.fake_child.name, self.fake_file)
         self.assertEqual(
             {self.fake_file.name: self.fake_file},
-            self.filesystem.root.get_entry(self.fake_child.name).entries)
+            self.filesystem.root.get_entry(self.fake_child.name).contents)
 
     def test_add_object_to_regular_file_error_posix(self):
         self.filesystem.is_windows_fs = False
         self.filesystem.add_object(self.root_name, self.fake_file)
-        with self.raises_os_error(errno.ENOTDIR):
-            self.filesystem.add_object(self.fake_file.name, self.fake_file)
+        self.assert_raises_os_error(errno.ENOTDIR,
+                                    self.filesystem.add_object,
+                                    self.fake_file.name, self.fake_file)
 
     def test_add_object_to_regular_file_error_windows(self):
         self.filesystem.is_windows_fs = True
         self.filesystem.add_object(self.root_name, self.fake_file)
-        with self.raises_os_error(errno.ENOENT):
-            self.filesystem.add_object(self.fake_file.name, self.fake_file)
+        self.assert_raises_os_error(errno.ENOENT,
+                                    self.filesystem.add_object,
+                                    self.fake_file.name, self.fake_file)
 
     def test_exists_file_added_to_child(self):
         self.filesystem.add_object(self.root_name, self.fake_child)
@@ -391,9 +395,10 @@ class FakeFilesystemUnitTest(TestCase):
     def test_get_nonexistent_object_from_child_error(self):
         self.filesystem.add_object(self.root_name, self.fake_child)
         self.filesystem.add_object(self.fake_child.name, self.fake_file)
-        with self.raises_os_error(errno.ENOENT):
-            self.filesystem.get_object(self.filesystem.joinpaths(
-                self.fake_child.name, 'some_bogus_filename'))
+        self.assert_raises_os_error(errno.ENOENT, self.filesystem.get_object,
+                                    self.filesystem.joinpaths(
+                                        self.fake_child.name,
+                                        'some_bogus_filename'))
 
     def test_remove_object_from_child(self):
         self.filesystem.add_object(self.root_name, self.fake_child)
@@ -401,23 +406,23 @@ class FakeFilesystemUnitTest(TestCase):
         target_path = self.filesystem.joinpaths(self.fake_child.name,
                                                 self.fake_file.name)
         self.filesystem.remove_object(target_path)
-        with self.raises_os_error(errno.ENOENT):
-            self.filesystem.get_object(target_path)
+        self.assert_raises_os_error(errno.ENOENT, self.filesystem.get_object,
+                                    target_path)
 
     def test_remove_object_from_child_error(self):
         self.filesystem.add_object(self.root_name, self.fake_child)
-        with self.raises_os_error(errno.ENOENT):
-            self.filesystem.remove_object(
-                self.filesystem.joinpaths(self.fake_child.name,
-                                          'some_bogus_filename'))
+        self.assert_raises_os_error(
+            errno.ENOENT, self.filesystem.remove_object,
+            self.filesystem.joinpaths(self.fake_child.name,
+                                      'some_bogus_filename'))
 
     def test_remove_object_from_non_directory_error(self):
         self.filesystem.add_object(self.root_name, self.fake_file)
-        with self.raises_os_error(errno.ENOTDIR):
-            self.filesystem.remove_object(
-                self.filesystem.joinpaths(
-                    '%s' % self.fake_file.name,
-                    'file_does_not_matter_since_parent_not_a_directory'))
+        self.assert_raises_os_error(
+            errno.ENOTDIR, self.filesystem.remove_object,
+            self.filesystem.joinpaths(
+                '%s' % self.fake_file.name,
+                'file_does_not_matter_since_parent_not_a_directory'))
 
     def test_exists_file_removed_from_child(self):
         self.filesystem.add_object(self.root_name, self.fake_child)
@@ -434,15 +439,13 @@ class FakeFilesystemUnitTest(TestCase):
             self.fake_child.name, self.fake_grandchild.name)
         grandchild_file = self.filesystem.joinpaths(
             grandchild_directory, self.fake_file.name)
-        with self.assertRaises(OSError):
-            self.filesystem.get_object(grandchild_file)
+        self.assertRaises(OSError, self.filesystem.get_object, grandchild_file)
         self.filesystem.add_object(grandchild_directory, self.fake_file)
         self.assertEqual(self.fake_file,
                          self.filesystem.get_object(grandchild_file))
         self.assertTrue(self.filesystem.exists(grandchild_file))
         self.filesystem.remove_object(grandchild_file)
-        with self.assertRaises(OSError):
-            self.filesystem.get_object(grandchild_file)
+        self.assertRaises(OSError, self.filesystem.get_object, grandchild_file)
         self.assertFalse(self.filesystem.exists(grandchild_file))
 
     def test_create_directory_in_root_directory(self):
@@ -455,8 +458,8 @@ class FakeFilesystemUnitTest(TestCase):
     def test_create_directory_in_root_directory_already_exists_error(self):
         path = 'foo'
         self.filesystem.create_dir(path)
-        with self.raises_os_error(errno.EEXIST):
-            self.filesystem.create_dir(path)
+        self.assert_raises_os_error(
+            errno.EEXIST, self.filesystem.create_dir, path)
 
     def test_create_directory(self):
         path = 'foo/bar/baz'
@@ -475,8 +478,8 @@ class FakeFilesystemUnitTest(TestCase):
     def test_create_directory_already_exists_error(self):
         path = 'foo/bar/baz'
         self.filesystem.create_dir(path)
-        with self.raises_os_error(errno.EEXIST):
-            self.filesystem.create_dir(path)
+        self.assert_raises_os_error(
+            errno.EEXIST, self.filesystem.create_dir, path)
 
     def test_create_file_in_read_only_directory_raises_in_posix(self):
         self.filesystem.is_windows_fs = False
@@ -485,8 +488,9 @@ class FakeFilesystemUnitTest(TestCase):
         file_path = dir_path + '/baz'
 
         if not is_root():
-            with self.raises_os_error(errno.EACCES):
-                self.filesystem.create_file(file_path)
+            self.assert_raises_os_error(errno.EACCES,
+                                        self.filesystem.create_file,
+                                        file_path)
         else:
             self.filesystem.create_file(file_path)
             self.assertTrue(self.filesystem.exists(file_path))
@@ -529,8 +533,8 @@ class FakeFilesystemUnitTest(TestCase):
     def test_create_file_in_root_directory_already_exists_error(self):
         path = 'foo'
         self.filesystem.create_file(path)
-        with self.raises_os_error(errno.EEXIST):
-            self.filesystem.create_file(path)
+        self.assert_raises_os_error(
+            errno.EEXIST, self.filesystem.create_file, path)
 
     def test_create_file(self):
         path = 'foo/bar/baz'
@@ -566,14 +570,13 @@ class FakeFilesystemUnitTest(TestCase):
             self.assertEqual('', f.read())
 
     def test_create_file_with_incorrect_mode_type(self):
-        with self.assertRaises(TypeError):
-            self.filesystem.create_file('foo', 'bar')
+        self.assertRaises(TypeError, self.filesystem.create_file, 'foo', 'bar')
 
     def test_create_file_already_exists_error(self):
         path = 'foo/bar/baz'
         self.filesystem.create_file(path, contents='dummy_data')
-        with self.raises_os_error(errno.EEXIST):
-            self.filesystem.create_file(path)
+        self.assert_raises_os_error(
+            errno.EEXIST, self.filesystem.create_file, path)
 
     def test_create_link(self):
         path = 'foo/bar/baz'
@@ -623,10 +626,10 @@ class FakeFilesystemUnitTest(TestCase):
 
     def check_directory_access_on_file(self, error_subtype):
         self.filesystem.create_file('not_a_dir')
-        with self.raises_os_error(error_subtype):
-            self.filesystem.resolve('not_a_dir/foo')
-        with self.raises_os_error(error_subtype):
-            self.filesystem.lresolve('not_a_dir/foo/bar')
+        self.assert_raises_os_error(
+            error_subtype, self.filesystem.resolve, 'not_a_dir/foo')
+        self.assert_raises_os_error(
+            error_subtype, self.filesystem.lresolve, 'not_a_dir/foo/bar')
 
     def test_directory_access_on_file_windows(self):
         self.filesystem.is_windows_fs = True
@@ -712,8 +715,8 @@ class CaseInsensitiveFakeFilesystemTest(TestCase):
         link_path = dir_path + "/link"
         link_target = link_path + "/link"
         self.os.symlink(link_target, link_path)
-        with self.raises_os_error(errno.ELOOP):
-            self.os.path.getsize(link_path)
+        self.assert_raises_os_error(
+            errno.ELOOP, self.os.path.getsize, link_path)
 
     def test_get_mtime(self):
         test_file = self.filesystem.create_file('foo/bar1.txt')
@@ -735,14 +738,13 @@ class CaseSensitiveFakeFilesystemTest(TestCase):
     def test_get_object(self):
         self.filesystem.create_dir('/foo/bar')
         self.filesystem.create_file('/foo/bar/baz')
-        with self.assertRaises(OSError):
-            self.filesystem.get_object('/Foo/Bar/Baz')
+        self.assertRaises(OSError, self.filesystem.get_object, '/Foo/Bar/Baz')
 
     def test_remove_object(self):
         self.filesystem.create_dir('/foo/bar')
         self.filesystem.create_file('/foo/bar/baz')
-        with self.assertRaises(OSError):
-            self.filesystem.remove_object('/Foo/Bar/Baz')
+        self.assertRaises(
+            OSError, self.filesystem.remove_object, '/Foo/Bar/Baz')
         self.assertTrue(self.filesystem.exists('/foo/bar/baz'))
 
     def test_exists(self):
@@ -778,14 +780,13 @@ class CaseSensitiveFakeFilesystemTest(TestCase):
     def test_getsize(self):
         file_path = 'foo/bar/baz'
         self.filesystem.create_file(file_path, contents='1234567')
-        with self.assertRaises(os.error):
-            self.path.getsize('FOO/BAR/BAZ')
+        self.assertRaises(os.error, self.path.getsize, 'FOO/BAR/BAZ')
 
     def test_get_mtime(self):
         test_file = self.filesystem.create_file('foo/bar1.txt')
         test_file.st_mtime = 24
-        with self.raises_os_error(errno.ENOENT):
-            self.path.getmtime('Foo/Bar1.TXT')
+        self.assert_raises_os_error(
+            errno.ENOENT, self.path.getmtime, 'Foo/Bar1.TXT')
 
 
 class OsPathInjectionRegressionTest(TestCase):
@@ -837,19 +838,24 @@ class OsPathInjectionRegressionTest(TestCase):
 
 class FakePathModuleTest(TestCase):
     def setUp(self):
+        self.orig_time = time.time
+        time.time = DummyTime(10, 1)
         self.filesystem = fake_filesystem.FakeFilesystem(path_separator='!')
         self.os = fake_filesystem.FakeOsModule(self.filesystem)
         self.path = self.os.path
 
+    def tearDown(self):
+        time.time = self.orig_time
+
     def check_abspath(self, is_windows):
         # the implementation differs in Windows and Posix, so test both
         self.filesystem.is_windows_fs = is_windows
-        filename = 'foo'
-        abspath = '!%s' % filename
+        filename = u'foo'
+        abspath = u'!%s' % filename
         self.filesystem.create_file(abspath)
         self.assertEqual(abspath, self.path.abspath(abspath))
         self.assertEqual(abspath, self.path.abspath(filename))
-        self.assertEqual(abspath, self.path.abspath('..!%s' % filename))
+        self.assertEqual(abspath, self.path.abspath(u'..!%s' % filename))
 
     def test_abspath_windows(self):
         self.check_abspath(is_windows=True)
@@ -901,23 +907,17 @@ class FakePathModuleTest(TestCase):
     def test_isabs_with_drive_component(self):
         self.filesystem.is_windows_fs = False
         self.assertFalse(self.path.isabs('C:!foo'))
-        self.assertFalse(self.path.isabs(b'C:!foo'))
         self.assertTrue(self.path.isabs('!'))
-        self.assertTrue(self.path.isabs(b'!'))
         self.filesystem.is_windows_fs = True
         self.assertTrue(self.path.isabs('C:!foo'))
-        self.assertTrue(self.path.isabs(b'C:!foo'))
         self.assertTrue(self.path.isabs('!'))
-        self.assertTrue(self.path.isabs(b'!'))
 
     def test_relpath(self):
         path_foo = '!path!to!foo'
         path_bar = '!path!to!bar'
         path_other = '!some!where!else'
-        with self.assertRaises(ValueError):
-            self.path.relpath(None)
-        with self.assertRaises(ValueError):
-            self.path.relpath('')
+        self.assertRaises(ValueError, self.path.relpath, None)
+        self.assertRaises(ValueError, self.path.relpath, '')
         self.assertEqual('path!to!foo', self.path.relpath(path_foo))
         self.assertEqual('..!foo',
                          self.path.relpath(path_foo, path_bar))
@@ -939,17 +939,6 @@ class FakePathModuleTest(TestCase):
         self.assertEqual('!george!washington!bridge',
                          self.os.path.realpath('bridge'))
 
-    @unittest.skipIf(sys.version_info < (3, 10), "'strict' new in Python 3.10")
-    def test_realpath_strict(self):
-        self.filesystem.create_file('!foo!bar')
-        self.filesystem.cwd = '!foo'
-        self.assertEqual('!foo!baz',
-                         self.os.path.realpath('baz', strict=False))
-        with self.raises_os_error(errno.ENOENT):
-            self.os.path.realpath('baz', strict=True)
-        self.assertEqual('!foo!bar',
-                         self.os.path.realpath('bar', strict=True))
-
     def test_samefile(self):
         file_path1 = '!foo!bar!baz'
         file_path2 = '!foo!bar!boo'
@@ -959,53 +948,46 @@ class FakePathModuleTest(TestCase):
         self.assertFalse(self.path.samefile(file_path1, file_path2))
         self.assertTrue(
             self.path.samefile(file_path1, '!foo!..!foo!bar!..!bar!baz'))
-        self.assertTrue(
-            self.path.samefile(file_path1, b'!foo!..!foo!bar!..!bar!baz'))
 
     def test_exists(self):
         file_path = 'foo!bar!baz'
-        file_path_bytes = b'foo!bar!baz'
         self.filesystem.create_file(file_path)
         self.assertTrue(self.path.exists(file_path))
-        self.assertTrue(self.path.exists(file_path_bytes))
         self.assertFalse(self.path.exists('!some!other!bogus!path'))
 
     def test_lexists(self):
         file_path = 'foo!bar!baz'
-        file_path_bytes = b'foo!bar!baz'
         self.filesystem.create_dir('foo!bar')
         self.filesystem.create_symlink(file_path, 'bogus')
         self.assertTrue(self.path.lexists(file_path))
-        self.assertTrue(self.path.lexists(file_path_bytes))
         self.assertFalse(self.path.exists(file_path))
-        self.assertFalse(self.path.exists(file_path_bytes))
         self.filesystem.create_file('foo!bar!bogus')
         self.assertTrue(self.path.exists(file_path))
 
     def test_dirname_with_drive(self):
         self.filesystem.is_windows_fs = True
-        self.assertEqual('c:!foo',
-                         self.path.dirname('c:!foo!bar'))
+        self.assertEqual(u'c:!foo',
+                         self.path.dirname(u'c:!foo!bar'))
         self.assertEqual(b'c:!',
                          self.path.dirname(b'c:!foo'))
-        self.assertEqual('!foo',
-                         self.path.dirname('!foo!bar'))
+        self.assertEqual(u'!foo',
+                         self.path.dirname(u'!foo!bar'))
         self.assertEqual(b'!',
                          self.path.dirname(b'!foo'))
-        self.assertEqual('c:foo',
-                         self.path.dirname('c:foo!bar'))
+        self.assertEqual(u'c:foo',
+                         self.path.dirname(u'c:foo!bar'))
         self.assertEqual(b'c:',
                          self.path.dirname(b'c:foo'))
-        self.assertEqual('foo',
-                         self.path.dirname('foo!bar'))
+        self.assertEqual(u'foo',
+                         self.path.dirname(u'foo!bar'))
 
     def test_dirname(self):
         dirname = 'foo!bar'
         self.assertEqual(dirname, self.path.dirname('%s!baz' % dirname))
 
     def test_join_strings(self):
-        components = ['foo', 'bar', 'baz']
-        self.assertEqual('foo!bar!baz', self.path.join(*components))
+        components = [u'foo', u'bar', u'baz']
+        self.assertEqual(u'foo!bar!baz', self.path.join(*components))
 
     def test_join_bytes(self):
         components = [b'foo', b'bar', b'baz']
@@ -1030,8 +1012,7 @@ class FakePathModuleTest(TestCase):
 
     def test_getsize_path_nonexistent(self):
         file_path = 'foo!bar!baz'
-        with self.assertRaises(os.error):
-            self.path.getsize(file_path)
+        self.assertRaises(os.error, self.path.getsize, file_path)
 
     def test_getsize_file_empty(self):
         file_path = 'foo!bar!baz'
@@ -1040,10 +1021,8 @@ class FakePathModuleTest(TestCase):
 
     def test_getsize_file_non_zero_size(self):
         file_path = 'foo!bar!baz'
-        file_path_bytes = b'foo!bar!baz'
         self.filesystem.create_file(file_path, contents='1234567')
         self.assertEqual(7, self.path.getsize(file_path))
-        self.assertEqual(7, self.path.getsize(file_path_bytes))
 
     def test_getsize_dir_empty(self):
         # For directories, only require that the size is non-negative.
@@ -1064,7 +1043,6 @@ class FakePathModuleTest(TestCase):
     def test_isdir(self):
         self.filesystem.create_file('foo!bar')
         self.assertTrue(self.path.isdir('foo'))
-        self.assertTrue(self.path.isdir(b'foo'))
         self.assertFalse(self.path.isdir('foo!bar'))
         self.assertFalse(self.path.isdir('it_dont_exist'))
 
@@ -1083,20 +1061,19 @@ class FakePathModuleTest(TestCase):
         self.filesystem.create_file('foo!bar')
         self.assertFalse(self.path.isfile('foo'))
         self.assertTrue(self.path.isfile('foo!bar'))
-        self.assertTrue(self.path.isfile(b'foo!bar'))
         self.assertFalse(self.path.isfile('it_dont_exist'))
 
     def test_get_mtime(self):
         test_file = self.filesystem.create_file('foo!bar1.txt')
-        self.assertNotEqual(24, self.path.getmtime('foo!bar1.txt'))
+        time.time.start()
+        self.assertEqual(10, test_file.st_mtime)
         test_file.st_mtime = 24
         self.assertEqual(24, self.path.getmtime('foo!bar1.txt'))
-        self.assertEqual(24, self.path.getmtime(b'foo!bar1.txt'))
 
     def test_get_mtime_raises_os_error(self):
-        self.assertFalse(self.path.exists('does_not_exist'))
-        with self.raises_os_error(errno.ENOENT):
-            self.path.getmtime('does_not_exist')
+        self.assertFalse(self.path.exists('it_dont_exist'))
+        self.assert_raises_os_error(errno.ENOENT, self.path.getmtime,
+                                    'it_dont_exist')
 
     def test_islink(self):
         self.filesystem.create_dir('foo')
@@ -1108,8 +1085,6 @@ class FakePathModuleTest(TestCase):
         # comments in Python/Lib/posixpath.py.
         self.assertTrue(self.path.islink('foo!link_to_file'))
         self.assertTrue(self.path.isfile('foo!link_to_file'))
-        self.assertTrue(self.path.islink(b'foo!link_to_file'))
-        self.assertTrue(self.path.isfile(b'foo!link_to_file'))
 
         self.assertTrue(self.path.isfile('foo!regular_file'))
         self.assertFalse(self.path.islink('foo!regular_file'))
@@ -1126,11 +1101,9 @@ class FakePathModuleTest(TestCase):
     def test_ismount(self):
         self.assertFalse(self.path.ismount(''))
         self.assertTrue(self.path.ismount('!'))
-        self.assertTrue(self.path.ismount(b'!'))
         self.assertFalse(self.path.ismount('!mount!'))
         self.filesystem.add_mount_point('!mount')
         self.assertTrue(self.path.ismount('!mount'))
-        self.assertTrue(self.path.ismount(b'!mount'))
         self.assertTrue(self.path.ismount('!mount!'))
 
     def test_ismount_with_drive_letters(self):
@@ -1169,7 +1142,7 @@ class FakePathModuleTest(TestCase):
             if self.is_windows:
                 private_path_function = '_get_bothseps'
             else:
-                private_path_function = '_join_real_path'
+                private_path_function = '_joinrealpath'
         if private_path_function:
             self.assertTrue(hasattr(self.path, private_path_function),
                             'Get a real os.path function '
@@ -1259,9 +1232,9 @@ class SplitPathTest(PathManipulationTestBase):
         self.assertEqual(('|a|b', 'c'), self.filesystem.splitpath('|a|b|c'))
 
     def test_root_separator_is_not_stripped(self):
-        self.assertEqual(('|||', ''), self.filesystem.splitpath('|||'))
+        self.assertEqual(('|', ''), self.filesystem.splitpath('|||'))
         self.assertEqual(('|', 'a'), self.filesystem.splitpath('|a'))
-        self.assertEqual(('|||', 'a'), self.filesystem.splitpath('|||a'))
+        self.assertEqual(('|', 'a'), self.filesystem.splitpath('|||a'))
 
     def test_empty_tail_if_path_ends_in_separator(self):
         self.assertEqual(('a|b', ''), self.filesystem.splitpath('a|b|'))
@@ -1392,7 +1365,6 @@ class AlternativePathSeparatorTest(TestCase):
 class DriveLetterSupportTest(TestCase):
     def setUp(self):
         self.filesystem = fake_filesystem.FakeFilesystem(path_separator='!')
-        self.filesystem.alternative_path_separator = '^'
         self.filesystem.is_windows_fs = True
 
     def test_initial_value(self):
@@ -1411,11 +1383,11 @@ class DriveLetterSupportTest(TestCase):
                          self.filesystem.normpath('!!foo!bar!!baz!!'))
 
     def test_normalize_path_str(self):
-        self.filesystem.cwd = ''
-        self.assertEqual('c:!foo!bar',
-                         self.filesystem.absnormpath('c:!foo!!bar'))
-        self.filesystem.cwd = 'c:!foo'
-        self.assertEqual('c:!foo!bar', self.filesystem.absnormpath('bar'))
+        self.filesystem.cwd = u''
+        self.assertEqual(u'c:!foo!bar',
+                         self.filesystem.absnormpath(u'c:!foo!!bar'))
+        self.filesystem.cwd = u'c:!foo'
+        self.assertEqual(u'c:!foo!bar', self.filesystem.absnormpath(u'bar'))
 
     def test_normalize_path_bytes(self):
         self.filesystem.cwd = b''
@@ -1425,30 +1397,20 @@ class DriveLetterSupportTest(TestCase):
         self.assertEqual(b'c:!foo!bar', self.filesystem.absnormpath(b'bar'))
 
     def test_split_path_str(self):
-        self.assertEqual(('c:!foo', 'bar'),
-                         self.filesystem.splitpath('c:!foo!bar'))
-        self.assertEqual(('c:!', 'foo'),
-                         self.filesystem.splitpath('c:!foo'))
-        self.assertEqual(('!foo', 'bar'),
-                         self.filesystem.splitpath('!foo!bar'))
-        self.assertEqual(('!', 'foo'),
-                         self.filesystem.splitpath('!foo'))
-        self.assertEqual(('c:foo', 'bar'),
-                         self.filesystem.splitpath('c:foo!bar'))
-        self.assertEqual(('c:', 'foo'),
-                         self.filesystem.splitpath('c:foo'))
-        self.assertEqual(('foo', 'bar'),
-                         self.filesystem.splitpath('foo!bar'))
-
-    def test_split_with_alt_separator(self):
-        self.assertEqual(('a^b', 'c'), self.filesystem.splitpath('a^b^c'))
-        self.assertEqual(('a^b!c', 'd'), self.filesystem.splitpath('a^b!c^d'))
-        self.assertEqual(('a^b!c', 'd'), self.filesystem.splitpath('a^b!c!d'))
-        self.assertEqual((b'a^b', b'c'), self.filesystem.splitpath(b'a^b^c'))
-        self.assertEqual((b'a^b!c', b'd'),
-                         self.filesystem.splitpath(b'a^b!c^d'))
-        self.assertEqual((b'a^b!c', b'd'),
-                         self.filesystem.splitpath(b'a^b!c!d'))
+        self.assertEqual((u'c:!foo', u'bar'),
+                         self.filesystem.splitpath(u'c:!foo!bar'))
+        self.assertEqual((u'c:!', u'foo'),
+                         self.filesystem.splitpath(u'c:!foo'))
+        self.assertEqual((u'!foo', u'bar'),
+                         self.filesystem.splitpath(u'!foo!bar'))
+        self.assertEqual((u'!', u'foo'),
+                         self.filesystem.splitpath(u'!foo'))
+        self.assertEqual((u'c:foo', u'bar'),
+                         self.filesystem.splitpath(u'c:foo!bar'))
+        self.assertEqual((u'c:', u'foo'),
+                         self.filesystem.splitpath(u'c:foo'))
+        self.assertEqual((u'foo', u'bar'),
+                         self.filesystem.splitpath(u'foo!bar'))
 
     def test_split_path_bytes(self):
         self.assertEqual((b'c:!foo', b'bar'),
@@ -1479,34 +1441,20 @@ class DriveLetterSupportTest(TestCase):
         self.assertEqual(['c:'], self.filesystem._path_components('c:'))
 
     def test_split_drive_str(self):
-        self.assertEqual(('c:', '!foo!bar'),
-                         self.filesystem.splitdrive('c:!foo!bar'))
-        self.assertEqual(('', '!foo!bar'),
-                         self.filesystem.splitdrive('!foo!bar'))
-        self.assertEqual(('c:', 'foo!bar'),
-                         self.filesystem.splitdrive('c:foo!bar'))
-        self.assertEqual(('', 'foo!bar'),
-                         self.filesystem.splitdrive('foo!bar'))
+        self.assertEqual((u'c:', u'!foo!bar'),
+                         self.filesystem.splitdrive(u'c:!foo!bar'))
+        self.assertEqual((u'', u'!foo!bar'),
+                         self.filesystem.splitdrive(u'!foo!bar'))
+        self.assertEqual((u'c:', u'foo!bar'),
+                         self.filesystem.splitdrive(u'c:foo!bar'))
+        self.assertEqual((u'', u'foo!bar'),
+                         self.filesystem.splitdrive(u'foo!bar'))
 
     def test_split_drive_bytes(self):
         self.assertEqual((b'c:', b'!foo!bar'),
                          self.filesystem.splitdrive(b'c:!foo!bar'))
         self.assertEqual((b'', b'!foo!bar'),
                          self.filesystem.splitdrive(b'!foo!bar'))
-
-    def test_split_drive_alt_sep(self):
-        self.assertEqual(('c:', '^foo^bar'),
-                         self.filesystem.splitdrive('c:^foo^bar'))
-        self.assertEqual(('', 'foo^bar'),
-                         self.filesystem.splitdrive('foo^bar'))
-        self.assertEqual(('', 'foo^bar!baz'),
-                         self.filesystem.splitdrive('foo^bar!baz'))
-        self.assertEqual((b'c:', b'^foo^bar'),
-                         self.filesystem.splitdrive(b'c:^foo^bar'))
-        self.assertEqual((b'', b'^foo^bar'),
-                         self.filesystem.splitdrive(b'^foo^bar'))
-        self.assertEqual((b'', b'^foo^bar!baz'),
-                         self.filesystem.splitdrive(b'^foo^bar!baz'))
 
     def test_split_drive_with_unc_path(self):
         self.assertEqual(('!!foo!bar', '!baz'),
@@ -1517,77 +1465,28 @@ class DriveLetterSupportTest(TestCase):
         self.assertEqual(('!!foo!bar', '!!'),
                          self.filesystem.splitdrive('!!foo!bar!!'))
 
-    def test_split_drive_with_unc_path_alt_sep(self):
-        self.assertEqual(('^^foo^bar', '!baz'),
-                         self.filesystem.splitdrive('^^foo^bar!baz'))
-        self.assertEqual(('', '^^foo'), self.filesystem.splitdrive('^^foo'))
-        self.assertEqual(('', '^^foo^^bar'),
-                         self.filesystem.splitdrive('^^foo^^bar'))
-        self.assertEqual(('^^foo^bar', '^^'),
-                         self.filesystem.splitdrive('^^foo^bar^^'))
-
-    def test_split_path_with_drive(self):
-        self.assertEqual(('d:!foo', 'baz'),
-                         self.filesystem.splitpath('d:!foo!baz'))
-        self.assertEqual(('d:!foo!baz', ''),
-                         self.filesystem.splitpath('d:!foo!baz!'))
-        self.assertEqual(('c:', ''),
-                         self.filesystem.splitpath('c:'))
-        self.assertEqual(('c:!', ''),
-                         self.filesystem.splitpath('c:!'))
-        self.assertEqual(('c:!!', ''),
-                         self.filesystem.splitpath('c:!!'))
-
-    def test_split_path_with_drive_alt_sep(self):
-        self.assertEqual(('d:^foo', 'baz'),
-                         self.filesystem.splitpath('d:^foo^baz'))
-        self.assertEqual(('d:^foo^baz', ''),
-                         self.filesystem.splitpath('d:^foo^baz^'))
-        self.assertEqual(('c:', ''),
-                         self.filesystem.splitpath('c:'))
-        self.assertEqual(('c:^', ''),
-                         self.filesystem.splitpath('c:^'))
-        self.assertEqual(('c:^^', ''),
-                         self.filesystem.splitpath('c:^^'))
-
-    def test_split_path_with_unc_path(self):
-        self.assertEqual(('!!foo!bar!', 'baz'),
-                         self.filesystem.splitpath('!!foo!bar!baz'))
-        self.assertEqual(('!!foo!bar', ''),
-                         self.filesystem.splitpath('!!foo!bar'))
-        self.assertEqual(('!!foo!bar!!', ''),
-                         self.filesystem.splitpath('!!foo!bar!!'))
-
-    def test_split_path_with_unc_path_alt_sep(self):
-        self.assertEqual(('^^foo^bar^', 'baz'),
-                         self.filesystem.splitpath('^^foo^bar^baz'))
-        self.assertEqual(('^^foo^bar', ''),
-                         self.filesystem.splitpath('^^foo^bar'))
-        self.assertEqual(('^^foo^bar^^', ''),
-                         self.filesystem.splitpath('^^foo^bar^^'))
-
 
 class DiskSpaceTest(TestCase):
     def setUp(self):
         self.filesystem = fake_filesystem.FakeFilesystem(path_separator='!',
                                                          total_size=100)
         self.os = fake_filesystem.FakeOsModule(self.filesystem)
-        self.open = fake_filesystem.FakeFileOpen(self.filesystem)
 
     def test_disk_usage_on_file_creation(self):
+        fake_open = fake_filesystem.FakeFileOpen(self.filesystem)
+
         total_size = 100
         self.filesystem.add_mount_point('mount', total_size)
 
         def create_too_large_file():
-            with self.open('!mount!file', 'w') as dest:
+            with fake_open('!mount!file', 'w') as dest:
                 dest.write('a' * (total_size + 1))
 
-        with self.assertRaises(OSError):
-            create_too_large_file()
+        self.assertRaises(OSError, create_too_large_file)
 
         self.assertEqual(0, self.filesystem.get_disk_usage('!mount').used)
 
-        with self.open('!mount!file', 'w') as dest:
+        with fake_open('!mount!file', 'w') as dest:
             dest.write('a' * total_size)
 
         self.assertEqual(total_size,
@@ -1607,16 +1506,16 @@ class DiskSpaceTest(TestCase):
         self.assertEqual((100, 5, 95), self.filesystem.get_disk_usage())
 
     def test_file_system_size_after_ascii_string_file_creation(self):
-        self.filesystem.create_file('!foo!bar', contents='complicated')
+        self.filesystem.create_file('!foo!bar', contents=u'complicated')
         self.assertEqual((100, 11, 89), self.filesystem.get_disk_usage())
 
     def test_filesystem_size_after_2byte_unicode_file_creation(self):
-        self.filesystem.create_file('!foo!bar', contents='сложно',
+        self.filesystem.create_file('!foo!bar', contents=u'сложно',
                                     encoding='utf-8')
         self.assertEqual((100, 12, 88), self.filesystem.get_disk_usage())
 
     def test_filesystem_size_after_3byte_unicode_file_creation(self):
-        self.filesystem.create_file('!foo!bar', contents='複雑',
+        self.filesystem.create_file('!foo!bar', contents=u'複雑',
                                     encoding='utf-8')
         self.assertEqual((100, 6, 94), self.filesystem.get_disk_usage())
 
@@ -1651,8 +1550,7 @@ class DiskSpaceTest(TestCase):
 
         initial_usage = self.filesystem.get_disk_usage()
 
-        with self.assertRaises(OSError):
-            create_large_file()
+        self.assertRaises(OSError, create_large_file)
 
         self.assertEqual(initial_usage, self.filesystem.get_disk_usage())
 
@@ -1674,8 +1572,7 @@ class DiskSpaceTest(TestCase):
         def create_large_file():
             self.filesystem.create_file('!foo!bar', st_size=101)
 
-        with self.assertRaises(OSError):
-            create_large_file()
+        self.assertRaises(OSError, create_large_file)
 
         self.assertEqual(initial_usage, self.filesystem.get_disk_usage())
 
@@ -1690,10 +1587,10 @@ class DiskSpaceTest(TestCase):
 
     def test_resize_file_with_size_too_large(self):
         file_object = self.filesystem.create_file('!foo!bar', st_size=50)
-        with self.raises_os_error(errno.ENOSPC):
-            file_object.set_large_file_size(200)
-        with self.raises_os_error(errno.ENOSPC):
-            file_object.set_contents('a' * 150)
+        self.assert_raises_os_error(errno.ENOSPC,
+                                    file_object.set_large_file_size, 200)
+        self.assert_raises_os_error(errno.ENOSPC, file_object.set_contents,
+                                    'a' * 150)
 
     def test_file_system_size_after_directory_rename(self):
         self.filesystem.create_file('!foo!bar', st_size=20)
@@ -1724,10 +1621,11 @@ class DiskSpaceTest(TestCase):
         self.filesystem.add_mount_point('!mount_limited', total_size=50)
         self.filesystem.add_mount_point('!mount_unlimited')
 
-        with self.raises_os_error(errno.ENOSPC):
-            self.filesystem.create_file('!mount_limited!foo', st_size=60)
-        with self.raises_os_error(errno.ENOSPC):
-            self.filesystem.create_file('!bar', st_size=110)
+        self.assert_raises_os_error(errno.ENOSPC,
+                                    self.filesystem.create_file,
+                                    '!mount_limited!foo', st_size=60)
+        self.assert_raises_os_error(errno.ENOSPC, self.filesystem.create_file,
+                                    '!bar', st_size=110)
 
         try:
             self.filesystem.create_file('!foo', st_size=60)
@@ -1754,8 +1652,9 @@ class DiskSpaceTest(TestCase):
 
     def test_set_larger_disk_size(self):
         self.filesystem.add_mount_point('!mount1', total_size=20)
-        with self.raises_os_error(errno.ENOSPC):
-            self.filesystem.create_file('!mount1!foo', st_size=100)
+        self.assert_raises_os_error(errno.ENOSPC,
+                                    self.filesystem.create_file, '!mount1!foo',
+                                    st_size=100)
         self.filesystem.set_disk_usage(total_size=200, path='!mount1')
         self.filesystem.create_file('!mount1!foo', st_size=100)
         self.assertEqual(100,
@@ -1764,8 +1663,9 @@ class DiskSpaceTest(TestCase):
     def test_set_smaller_disk_size(self):
         self.filesystem.add_mount_point('!mount1', total_size=200)
         self.filesystem.create_file('!mount1!foo', st_size=100)
-        with self.raises_os_error(errno.ENOSPC):
-            self.filesystem.set_disk_usage(total_size=50, path='!mount1')
+        self.assert_raises_os_error(errno.ENOSPC,
+                                    self.filesystem.set_disk_usage,
+                                    total_size=50, path='!mount1')
         self.filesystem.set_disk_usage(total_size=150, path='!mount1')
         self.assertEqual(50,
                          self.filesystem.get_disk_usage('!mount1!foo').free)
@@ -1790,60 +1690,13 @@ class DiskSpaceTest(TestCase):
         self.filesystem.create_file('d:!foo!bar!baz', st_size=100)
         self.filesystem.create_file('d:!foo!baz', st_size=100)
         self.filesystem.set_disk_usage(total_size=1000, path='d:')
-        self.assertEqual(800, self.filesystem.get_disk_usage('d:!foo').free)
+        self.assertEqual(self.filesystem.get_disk_usage('d:!foo').free, 800)
 
     def test_copying_preserves_byte_contents(self):
         source_file = self.filesystem.create_file('foo', contents=b'somebytes')
         dest_file = self.filesystem.create_file('bar')
         dest_file.set_contents(source_file.contents)
         self.assertEqual(dest_file.contents, source_file.contents)
-
-    def test_diskusage_after_open_write(self):
-        with self.open('bar.txt', 'w') as f:
-            f.write('a' * 60)
-            f.flush()
-        self.assertEqual(60, self.filesystem.get_disk_usage()[1])
-
-    def test_disk_full_after_reopened(self):
-        with self.open('bar.txt', 'w') as f:
-            f.write('a' * 60)
-        with self.open('bar.txt') as f:
-            self.assertEqual('a' * 60, f.read())
-        with self.raises_os_error(errno.ENOSPC):
-            with self.open('bar.txt', 'w') as f:
-                f.write('b' * 110)
-                with self.raises_os_error(errno.ENOSPC):
-                    f.flush()
-        with self.open('bar.txt') as f:
-            self.assertEqual('', f.read())
-
-    def test_disk_full_append(self):
-        file_path = 'bar.txt'
-        with self.open(file_path, 'w') as f:
-            f.write('a' * 60)
-        with self.open(file_path) as f:
-            self.assertEqual('a' * 60, f.read())
-        with self.raises_os_error(errno.ENOSPC):
-            with self.open(file_path, 'a') as f:
-                f.write('b' * 41)
-                with self.raises_os_error(errno.ENOSPC):
-                    f.flush()
-        with self.open('bar.txt') as f:
-            self.assertEqual(f.read(), 'a' * 60)
-
-    def test_disk_full_after_reopened_rplus_seek(self):
-        with self.open('bar.txt', 'w') as f:
-            f.write('a' * 60)
-        with self.open('bar.txt') as f:
-            self.assertEqual(f.read(), 'a' * 60)
-        with self.raises_os_error(errno.ENOSPC):
-            with self.open('bar.txt', 'r+') as f:
-                f.seek(50)
-                f.write('b' * 60)
-                with self.raises_os_error(errno.ENOSPC):
-                    f.flush()
-        with self.open('bar.txt') as f:
-            self.assertEqual(f.read(), 'a' * 60)
 
 
 class MountPointTest(TestCase):
@@ -1873,10 +1726,10 @@ class MountPointTest(TestCase):
             '!foo!baz!foo!bar').st_dev)
 
     def test_that_mount_point_cannot_be_added_twice(self):
-        with self.raises_os_error(errno.EEXIST):
-            self.filesystem.add_mount_point('!foo')
-        with self.raises_os_error(errno.EEXIST):
-            self.filesystem.add_mount_point('!foo!')
+        self.assert_raises_os_error(errno.EEXIST,
+                                    self.filesystem.add_mount_point, '!foo')
+        self.assert_raises_os_error(errno.EEXIST,
+                                    self.filesystem.add_mount_point, '!foo!')
 
     def test_that_drives_are_auto_mounted(self):
         self.filesystem.is_windows_fs = True
@@ -1907,31 +1760,7 @@ class MountPointTest(TestCase):
             '!!foo!bar!bip!bop').st_dev)
 
 
-class ConvenienceMethodTest(RealFsTestCase):
-
-    def test_create_link_with_non_existent_parent(self):
-        self.skip_if_symlink_not_supported()
-        file1_path = self.make_path('test_file1')
-        link_path = self.make_path('nonexistent', 'test_file2')
-
-        self.filesystem.create_file(file1_path, contents='link test')
-        self.assertEqual(self.os.stat(file1_path).st_nlink, 1)
-        self.filesystem.create_link(file1_path, link_path)
-        self.assertEqual(self.os.stat(file1_path).st_nlink, 2)
-        self.assertTrue(self.filesystem.exists(link_path))
-
-    def test_create_symlink_with_non_existent_parent(self):
-        self.skip_if_symlink_not_supported()
-        file1_path = self.make_path('test_file1')
-        link_path = self.make_path('nonexistent', 'test_file2')
-
-        self.filesystem.create_file(file1_path, contents='symlink test')
-        self.filesystem.create_symlink(link_path, file1_path)
-        self.assertTrue(self.filesystem.exists(link_path))
-        self.assertTrue(self.filesystem.islink(link_path))
-
-
-class RealFileSystemAccessTest(RealFsTestCase):
+class RealFileSystemAccessTest(TestCase):
     def setUp(self):
         # use the real path separator to work with the real file system
         self.filesystem = fake_filesystem.FakeFilesystem()
@@ -1942,26 +1771,29 @@ class RealFileSystemAccessTest(RealFsTestCase):
 
     def test_add_non_existing_real_file_raises(self):
         nonexisting_path = os.path.join('nonexisting', 'test.txt')
-        with self.assertRaises(OSError):
-            self.filesystem.add_real_file(nonexisting_path)
+        self.assertRaises(OSError, self.filesystem.add_real_file,
+                          nonexisting_path)
         self.assertFalse(self.filesystem.exists(nonexisting_path))
 
     def test_add_non_existing_real_directory_raises(self):
         nonexisting_path = '/nonexisting'
-        with self.raises_os_error(errno.ENOENT):
-            self.filesystem.add_real_directory(nonexisting_path)
+        self.assert_raises_os_error(errno.ENOENT,
+                                    self.filesystem.add_real_directory,
+                                    nonexisting_path)
         self.assertFalse(self.filesystem.exists(nonexisting_path))
 
     def test_existing_fake_file_raises(self):
         real_file_path = __file__
         self.filesystem.create_file(real_file_path)
-        with self.raises_os_error(errno.EEXIST):
-            self.filesystem.add_real_file(real_file_path)
+        self.assert_raises_os_error(errno.EEXIST,
+                                    self.filesystem.add_real_file,
+                                    real_file_path)
 
     def test_existing_fake_directory_raises(self):
         self.filesystem.create_dir(self.root_path)
-        with self.raises_os_error(errno.EEXIST):
-            self.filesystem.add_real_directory(self.root_path)
+        self.assert_raises_os_error(errno.EEXIST,
+                                    self.filesystem.add_real_directory,
+                                    self.root_path)
 
     def check_fake_file_stat(self, fake_file, real_file_path,
                              target_path=None):
@@ -1988,8 +1820,8 @@ class RealFileSystemAccessTest(RealFsTestCase):
             real_contents = f.read()
         self.assertEqual(fake_file.byte_contents, real_contents)
         if not is_root():
-            with self.raises_os_error(errno.EACCES):
-                self.fake_open(real_file_path, 'w')
+            self.assert_raises_os_error(
+                errno.EACCES, self.fake_open, real_file_path, 'w')
         else:
             with self.fake_open(real_file_path, 'w'):
                 pass
@@ -2026,9 +1858,9 @@ class RealFileSystemAccessTest(RealFsTestCase):
     def test_add_real_file_to_existing_path(self):
         real_file_path = os.path.abspath(__file__)
         self.filesystem.create_file('/foo/bar')
-        with self.raises_os_error(errno.EEXIST):
-            self.filesystem.add_real_file(real_file_path,
-                                          target_path='/foo/bar')
+        self.assert_raises_os_error(
+            errno.EEXIST, self.filesystem.add_real_file,
+            real_file_path, target_path='/foo/bar')
 
     def test_add_real_file_to_non_existing_path(self):
         real_file_path = os.path.abspath(__file__)
@@ -2160,7 +1992,6 @@ class RealFileSystemAccessTest(RealFsTestCase):
         )
 
     def test_add_existing_real_directory_symlink_target_path(self):
-        self.skip_if_symlink_not_supported(force_real_fs=True)
         real_directory = os.path.join(self.root_path, 'pyfakefs', 'tests')
         symlinks = [
             ('..', os.path.join(
@@ -2169,9 +2000,15 @@ class RealFileSystemAccessTest(RealFsTestCase):
                 real_directory, 'fixtures', 'symlink_file_relative')),
         ]
 
-        with self.create_symlinks(symlinks):
-            self.filesystem.add_real_directory(
-                real_directory, target_path='/path', lazy_read=False)
+        try:
+            with self.create_symlinks(symlinks):
+                self.filesystem.add_real_directory(
+                    real_directory, target_path='/path', lazy_read=False)
+        except OSError:
+            if self.is_windows:
+                raise unittest.SkipTest(
+                    'Symlinks under Windows need admin privileges')
+            raise
 
         self.assertTrue(self.filesystem.exists(
             '/path/fixtures/symlink_dir_relative'))
@@ -2181,7 +2018,6 @@ class RealFileSystemAccessTest(RealFsTestCase):
             '/path/fixtures/symlink_file_relative'))
 
     def test_add_existing_real_directory_symlink_lazy_read(self):
-        self.skip_if_symlink_not_supported(force_real_fs=True)
         real_directory = os.path.join(self.root_path, 'pyfakefs', 'tests')
         symlinks = [
             ('..', os.path.join(
@@ -2190,22 +2026,29 @@ class RealFileSystemAccessTest(RealFsTestCase):
                 real_directory, 'fixtures', 'symlink_file_relative')),
         ]
 
-        with self.create_symlinks(symlinks):
-            self.filesystem.add_real_directory(
-                real_directory, target_path='/path', lazy_read=True)
+        try:
+            with self.create_symlinks(symlinks):
+                self.filesystem.add_real_directory(
+                    real_directory, target_path='/path', lazy_read=True)
 
-            self.assertTrue(self.filesystem.exists(
-                '/path/fixtures/symlink_dir_relative'))
-            self.assertTrue(self.filesystem.exists(
-                '/path/fixtures/symlink_dir_relative/all_tests.py'))
-            self.assertTrue(self.filesystem.exists(
-                '/path/fixtures/symlink_file_relative'))
+                self.assertTrue(self.filesystem.exists(
+                    '/path/fixtures/symlink_dir_relative'))
+                self.assertTrue(self.filesystem.exists(
+                    '/path/fixtures/symlink_dir_relative/all_tests.py'))
+                self.assertTrue(self.filesystem.exists(
+                    '/path/fixtures/symlink_file_relative'))
+        except OSError:
+            if self.is_windows:
+                raise unittest.SkipTest(
+                    'Symlinks under Windows need admin privileges')
+            raise
 
     def test_add_existing_real_directory_tree_to_existing_path(self):
         self.filesystem.create_dir('/foo/bar')
-        with self.raises_os_error(errno.EEXIST):
-            self.filesystem.add_real_directory(
-                self.root_path, target_path='/foo/bar')
+        self.assert_raises_os_error(errno.EEXIST,
+                                    self.filesystem.add_real_directory,
+                                    self.root_path,
+                                    target_path='/foo/bar')
 
     def test_add_existing_real_directory_tree_to_other_path(self):
         self.filesystem.add_real_directory(self.root_path,
@@ -2336,7 +2179,7 @@ class FileSideEffectTests(TestCase):
         self.side_effect_called = False
         with fake_open('/a/b/file_one', 'w') as handle:
             handle.write('foo')
-        self.assertEqual(self.side_effect_file_object_content, 'foo')
+        self.assertEquals(self.side_effect_file_object_content, 'foo')
 
 
 if __name__ == '__main__':

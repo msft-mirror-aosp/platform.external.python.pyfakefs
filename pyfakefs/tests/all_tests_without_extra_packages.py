@@ -11,12 +11,20 @@
 # limitations under the License.
 
 """A test suite that runs all tests for pyfakefs at once.
-Excludes tests using external scandir package."""
+Excludes tests using external pathlib2 and scandir packages."""
 
 import sys
 import unittest
 
 from pyfakefs import extra_packages
+
+if extra_packages.pathlib2:
+    extra_packages.pathlib2 = None
+    try:
+        import pathlib
+    except ImportError:
+        pathlib = None
+    extra_packages.pathlib = pathlib
 
 if extra_packages.use_scandir_package:
     extra_packages.use_scandir_package = False

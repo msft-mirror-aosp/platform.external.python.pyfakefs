@@ -12,11 +12,9 @@
 
 # pytest
 .cache/
-.pytest_cache/
 
 # autodoc created by sphinx
 gh-pages/
 
 # Distribution creation
 dist/
-build/

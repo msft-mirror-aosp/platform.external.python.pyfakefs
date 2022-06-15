@@ -133,14 +133,14 @@ class ScanDirIter:
         else:
             self.abspath = self.filesystem.absnormpath(path)
             self.path = to_string(path)
-        entries = self.filesystem.confirmdir(self.abspath).entries
-        self.entry_iter = iter(entries)
+        contents = self.filesystem.confirmdir(self.abspath).contents
+        self.contents_iter = iter(contents)
 
     def __iter__(self):
         return self
 
     def __next__(self):
-        entry = self.entry_iter.__next__()
+        entry = self.contents_iter.__next__()
         dir_entry = DirEntry(self.filesystem)
         dir_entry.name = entry
         dir_entry.path = self.filesystem.joinpaths(self.path,
@@ -241,11 +241,12 @@ def walk(filesystem, top, topdown=True, onerror=None, followlinks=False):
                 yield top_contents
 
             for directory in top_contents[1]:
-                path = filesystem.joinpaths(top_dir, directory)
-                if not followlinks and filesystem.islink(path):
+                if not followlinks and filesystem.islink(directory):
                     continue
-                for contents in do_walk(path):
+                for contents in do_walk(filesystem.joinpaths(top_dir,
+                                                             directory)):
                     yield contents
+
             if not topdown:
                 yield top_contents
 
