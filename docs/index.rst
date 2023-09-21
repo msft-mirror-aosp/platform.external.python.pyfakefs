@@ -13,13 +13,12 @@ Contents:
 
    intro
    usage
+   troubleshooting
    autopatch
    modules
-   api
 
 Indices and tables
 ==================
 
 * :ref:`genindex`
 * :ref:`search`
-
