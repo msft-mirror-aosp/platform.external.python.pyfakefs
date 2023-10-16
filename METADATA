@@ -1,10 +1,9 @@
-name: "pyfakefs"
-description:
-    "pyfakefs implements a fake file system that mocks the Python file system "
-    "modules. Using pyfakefs, your tests operate on a fake file system in "
-    "memory without touching the real disk. The software under test requires no "
-    "modification to work with pyfakefs."
+# This project was upgraded with external_updater.
+# Usage: tools/external_updater/updater.sh update python/pyfakefs
+# For more info, check https://cs.android.com/android/platform/superproject/+/main:tools/external_updater/README.md
 
+name: "pyfakefs"
+description: "pyfakefs implements a fake file system that mocks the Python file system modules. Using pyfakefs, your tests operate on a fake file system in memory without touching the real disk. The software under test requires no modification to work with pyfakefs."
 third_party {
   url {
     type: HOMEPAGE
@@ -12,9 +11,13 @@ third_party {
   }
   url {
     type: GIT
-    value: "https://github.com/jmcgeheeiv/pyfakefs.git"
+    value: "https://github.com/pytest-dev/pyfakefs.git"
   }
-  version: "9a387966d65e20e465ed03af5b3bfb632984adc3"
+  version: "979a878b12a3f625abe986a2249b677e6193ae3d"
   license_type: NOTICE
-  last_upgrade_date { year: 2022 month: 03 day: 30 }
+  last_upgrade_date {
+    year: 2023
+    month: 8
+    day: 25
+  }
 }
