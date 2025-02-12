@@ -80,3 +80,27 @@ def fs_session(request):
 def pytest_sessionfinish(session, exitstatus):
     """Make sure that the cache is cleared before the final test shutdown."""
     Patcher.clear_fs_cache()
+
+
+@pytest.hookimpl(hookwrapper=True, tryfirst=True)
+def pytest_runtest_logreport(report):
+    """Make sure that patching is not active during reporting."""
+    pause = Patcher.PATCHER is not None and report.when == "call"
+    if pause:
+        Patcher.PATCHER.pause()
+    yield
+
+
+@pytest.hookimpl(hookwrapper=True, trylast=True)
+def pytest_runtest_call(item):
+    if Patcher.PATCHER is not None:
+        Patcher.PATCHER.resume()
+    yield
+
+
+@pytest.hookimpl(hookwrapper=True, tryfirst=True)
+def pytest_runtest_teardown(item, nextitem):
+    """Make sure that patching is not active during reporting."""
+    if Patcher.PATCHER is not None:
+        Patcher.PATCHER.pause()
+    yield

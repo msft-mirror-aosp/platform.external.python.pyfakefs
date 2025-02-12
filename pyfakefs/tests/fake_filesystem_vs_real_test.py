@@ -65,10 +65,10 @@ class FakeFilesystemVsRealTest(TestCase):
             os.mkdir(real_path)
             self.fake_os.mkdir(fake_path)
         if file_type == "f":
-            fh = open(real_path, "w")
+            fh = open(real_path, "w", encoding="utf8")
             fh.write(contents or "")
             fh.close()
-            fh = self.fake_open(fake_path, "w")
+            fh = self.fake_open(fake_path, "w", encoding="utf8")
             fh.write(contents or "")
             fh.close()
         # b for binary file
@@ -179,7 +179,7 @@ class FakeFilesystemVsRealTest(TestCase):
         def _error_class(exc):
             if exc:
                 if hasattr(exc, "errno"):
-                    return "{}({})".format(exc.__class__.__name__, exc.errno)
+                    return f"{exc.__class__.__name__}({exc.errno})"
                 return exc.__class__.__name__
             return "None"
 
@@ -192,18 +192,18 @@ class FakeFilesystemVsRealTest(TestCase):
         # is almost always different because of the file paths.
         if _error_class(real_err) != _error_class(fake_err):
             if real_err is None:
-                return "%s: real version returned %s, fake raised %s" % (
+                return "{}: real version returned {}, fake raised {}".format(
                     method_call,
                     real_value,
                     _error_class(fake_err),
                 )
             if fake_err is None:
-                return "%s: real version raised %s, fake returned %s" % (
+                return "{}: real version raised {}, fake returned {}".format(
                     method_call,
                     _error_class(real_err),
                     fake_value,
                 )
-            return "%s: real version raised %s, fake raised %s" % (
+            return "{}: real version raised {}, fake raised {}".format(
                 method_call,
                 _error_class(real_err),
                 _error_class(fake_err),
@@ -211,7 +211,7 @@ class FakeFilesystemVsRealTest(TestCase):
         real_errno = _get_errno(real_err)
         fake_errno = _get_errno(fake_err)
         if real_errno != fake_errno:
-            return "%s(%s): both raised %s, real errno %s, fake errno %s" % (
+            return "{}({}): both raised {}, real errno {}, fake errno {}".format(
                 method_name,
                 path,
                 _error_class(real_err),
@@ -230,7 +230,7 @@ class FakeFilesystemVsRealTest(TestCase):
                 real_value = real_value[len(self.real_base) :]
                 fake_value = fake_value[len(self.fake_base) :]
         if real_value != fake_value:
-            return "%s: real return %s, fake returned %s" % (
+            return "{}: real return {}, fake returned {}".format(
                 method_call,
                 real_value,
                 fake_value,
@@ -318,8 +318,11 @@ class FakeFilesystemVsRealTest(TestCase):
         Returns:
             A description of the difference in behavior, or None.
         """
-        with open(path, mode) as real_fh:
-            with self.fake_open(path, mode) as fake_fh:
+        kwargs = {}
+        if "b" not in mode:
+            kwargs["encoding"] = "utf8"
+        with open(path, mode, **kwargs) as real_fh:
+            with self.fake_open(path, mode, **kwargs) as fake_fh:
                 return self._compare_behaviors(
                     method_name, data, real_fh, fake_fh, method_returns_data
                 )
@@ -469,7 +472,7 @@ class FakeFilesystemVsRealTest(TestCase):
             )
 
         if not is_exception_equal:
-            msg = "Behaviors don't match on open with args %s & kwargs %s.\n" % (
+            msg = "Behaviors don't match on open with args {} & kwargs {}.\n".format(
                 args,
                 kwargs,
             )

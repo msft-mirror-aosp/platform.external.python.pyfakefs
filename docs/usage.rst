@@ -17,18 +17,22 @@ Here is an example for a simple test:
 
 .. code:: python
 
-   def my_fakefs_test(fs):
+   import os
+
+
+   def test_fakefs(fs):
        # "fs" is the reference to the fake file system
        fs.create_file("/var/data/xx1.txt")
        assert os.path.exists("/var/data/xx1.txt")
 
 If you are bothered by the ``pylint`` warning,
-``C0103: Argument name "fs" doesn't conform to snake_case naming style
-(invalid-name)``,
-you can define a longer name in your ``conftest.py`` and use that in your
-tests:
+``C0103: Argument name "fs" doesn't conform to snake_case naming style (invalid-name)``,
+you can define a longer name in your ``conftest.py`` and use that in your tests:
 
 .. code:: python
+
+    import pytest
+
 
     @pytest.fixture
     def fake_filesystem(fs):  # pylint:disable=invalid-name
@@ -47,7 +51,7 @@ respectively.
   not setup / tear down the fake filesystem in the current scope; instead, it
   will just serve as a reference to the active fake filesystem. That means that changes
   done in the fake filesystem inside a test will remain there until the respective scope
-  ends.
+  ends (see also :ref:`nested_patcher_invocation`).
 
 Patch using fake_filesystem_unittest
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -60,6 +64,7 @@ with the fake file system functions and modules:
 
 .. code:: python
 
+    import os
     from pyfakefs.fake_filesystem_unittest import TestCase
 
 
@@ -81,6 +86,8 @@ method ``setUpClassPyfakefs`` instead:
 
 .. code:: python
 
+    import os
+    import pathlib
     from pyfakefs.fake_filesystem_unittest import TestCase
 
 
@@ -89,7 +96,9 @@ method ``setUpClassPyfakefs`` instead:
         def setUpClass(cls):
             cls.setUpClassPyfakefs()
             # setup the fake filesystem using standard functions
-            pathlib.Path("/test/file1.txt").touch()
+            path = pathlib.Path("/test")
+            path.mkdir()
+            (path / "file1.txt").touch()
             # you can also access the fake fs via fake_fs() if needed
             cls.fake_fs().create_file("/test/file2.txt", contents="test")
 
@@ -105,7 +114,8 @@ method ``setUpClassPyfakefs`` instead:
             self.assertTrue(os.path.exists(file_path))
 
 .. note:: This feature cannot be used with a Python version before Python 3.8 due to
-  a missing feature in ``unittest``.
+  a missing feature in ``unittest``. If you use ``pytest`` for running tests using this feature,
+  you need to have at least ``pytest`` version 6.2 due to an issue in earlier versions.
 
 .. caution:: If this is used, any changes made in the fake filesystem inside a test
   will remain there for all following tests in the test class, if they are not reverted
@@ -170,13 +180,13 @@ order, as shown here:
    @patchfs
    @mock.patch("foo.bar")
    def test_something(fake_fs, mocked_bar):
-       ...
+       assert foo()
 
 
    @mock.patch("foo.bar")
    @patchfs
    def test_something(mocked_bar, fake_fs):
-       ...
+       assert foo()
 
 .. note::
   Avoid writing the ``patchfs`` decorator *between* ``mock.patch`` operators,
@@ -247,7 +257,7 @@ In case of ``pytest``, you have two possibilities:
 
 
   def test_something(fs_no_root):
-      ...
+      assert foo()
 
 - You can also pass the arguments using ``@pytest.mark.parametrize``. Note that
   you have to provide `all Patcher arguments`_ before the needed ones, as
@@ -262,7 +272,7 @@ In case of ``pytest``, you have two possibilities:
 
   @pytest.mark.parametrize("fs", [[None, None, None, False]], indirect=True)
   def test_something(fs):
-      ...
+      assert foo()
 
 Unittest
 ........
@@ -280,7 +290,7 @@ instance:
           self.setUpPyfakefs(allow_root_user=False)
 
       def testSomething(self):
-          ...
+          assert foo()
 
 patchfs
 .......
@@ -294,7 +304,7 @@ the decorator:
 
   @patchfs(allow_root_user=False)
   def test_something(fake_fs):
-      ...
+      assert foo()
 
 
 List of custom arguments
@@ -380,6 +390,7 @@ an example from a related issue):
 .. code:: python
 
   import pathlib
+  import click
 
 
   @click.command()
@@ -395,11 +406,12 @@ dynamically. All modules loaded after the initial patching described above
 will be patched using this second mechanism.
 
 Given that the example function ``check_if_exists`` shown above is located in
-the file ``example/sut.py``, the following code will work:
+the file ``example/sut.py``, the following code will work (imports are omitted):
 
 .. code:: python
 
   import example
+
 
   # example using unittest
   class ReloadModuleTest(fake_filesystem_unittest.TestCase):
@@ -456,6 +468,9 @@ has now been been integrated into ``pyfakefs``):
 
 .. code:: python
 
+  import django
+
+
   class FakeLocks:
       """django.core.files.locks uses low level OS functions, fake it."""
 
@@ -485,13 +500,14 @@ has now been been integrated into ``pyfakefs``):
   with Patcher(modules_to_patch={"django.core.files.locks": FakeLocks}):
       test_django_stuff()
 
+
   # test code using unittest
   class TestUsingDjango(fake_filesystem_unittest.TestCase):
       def setUp(self):
           self.setUpPyfakefs(modules_to_patch={"django.core.files.locks": FakeLocks})
 
       def test_django_stuff(self):
-          ...
+          assert foo()
 
 
   # test code using pytest
@@ -499,13 +515,13 @@ has now been been integrated into ``pyfakefs``):
       "fs", [[None, None, {"django.core.files.locks": FakeLocks}]], indirect=True
   )
   def test_django_stuff(fs):
-      ...
+      assert foo()
 
 
   # test code using patchfs decorator
   @patchfs(modules_to_patch={"django.core.files.locks": FakeLocks})
   def test_django_stuff(fake_fs):
-      ...
+      assert foo()
 
 additional_skip_names
 .....................
@@ -525,6 +541,7 @@ Alternatively to the module names, the modules themselves may be used:
 .. code:: python
 
   import pydevd
+  from pyfakefs.fake_filesystem_unittest import Patcher
 
   with Patcher(additional_skip_names=[pydevd]) as patcher:
       patcher.fs.create_file("foo")
@@ -547,8 +564,7 @@ these libraries so that they will work with the fake filesystem. Currently, this
 includes patches for ``pandas`` read methods like ``read_csv`` and
 ``read_excel``, and for ``Django`` file locks--more may follow. Ordinarily,
 the default value of ``use_known_patches`` should be used, but it is present
-to allow users to disable this patching in case it causes any problems. It
-may be removed or replaced by more fine-grained arguments in future releases.
+to allow users to disable this patching in case it causes any problems.
 
 patch_open_code
 ...............
@@ -569,10 +585,21 @@ set ``patch_open_code`` to ``PatchMode.AUTO``:
 
   @patchfs(patch_open_code=PatchMode.AUTO)
   def test_something(fs):
-      ...
+      assert foo()
 
-.. note:: This argument is subject to change or removal in future
-  versions of ``pyfakefs``, depending on the upcoming use cases.
+In this mode, it is also possible to import modules created in the fake filesystem
+using `importlib.import_module`. Make sure that the `sys.path` contains the parent path in this case:
+
+.. code:: python
+
+  @patchfs(patch_open_code=PatchMode.AUTO)
+  def test_fake_import(fs):
+      fake_module_path = Path("/") / "site-packages" / "fake_module.py"
+      self.fs.create_file(fake_module_path, contents="x = 5")
+      sys.path.insert(0, str(fake_module_path.parent))
+      module = importlib.import_module("fake_module")
+      assert module.x == 5
+
 
 .. _patch_default_args:
 
@@ -595,7 +622,7 @@ search for this kind of default arguments and patch them automatically.
 You could also use the :ref:`modules_to_reload` option with the module that
 contains the default argument instead, if you want to avoid the overhead.
 
-.. note:: There are some cases where this option dees not work:
+.. note:: There are some cases where this option does *not* work:
 
   - if default arguments are *computed* using file system functions:
 
@@ -660,23 +687,35 @@ If you want to clear the cache just for a specific test instead, you can call
       fs.clear_cache()
       ...
 
+.. _use_dynamic_patch:
+
+use_dynamic_patch
+~~~~~~~~~~~~~~~~~
+If ``True`` (the default), dynamic patching after setup is used (for example
+for modules loaded locally inside of functions).
+Can be switched off if it causes unwanted side effects, though that would mean that
+dynamically loaded modules are no longer patched, if they use file system functions.
+See also :ref:`failing_dyn_patcher` in the troubleshooting guide for more information.
+
 
 .. _convenience_methods:
 
 Using convenience methods
 -------------------------
 While ``pyfakefs`` can be used just with the standard Python file system
-functions, there are few convenience methods in ``fake_filesystem`` that can
+functions, there are a few convenience methods in ``fake_filesystem`` that can
 help you setting up your tests. The methods can be accessed via the
 ``fake_filesystem`` instance in your tests: ``Patcher.fs``, the ``fs``
-fixture in pytest, ``TestCase.fs`` for ``unittest``, and the ``fs`` argument
+fixture in pytest, ``TestCase.fs`` for ``unittest``, and the positional argument
 for the ``patchfs`` decorator.
 
 File creation helpers
 ~~~~~~~~~~~~~~~~~~~~~
 To create files, directories or symlinks together with all the directories
-in the path, you may use ``create_file()``, ``create_dir()``,
-``create_symlink()`` and ``create_link()``, respectively.
+in the path, you may use :py:meth:`create_file()<pyfakefs.fake_filesystem.FakeFilesystem.create_file>`,
+:py:meth:`create_dir()<pyfakefs.fake_filesystem.FakeFilesystem.create_dir>`,
+:py:meth:`create_symlink()<pyfakefs.fake_filesystem.FakeFilesystem.create_symlink>` and
+:py:meth:`create_link()<pyfakefs.fake_filesystem.FakeFilesystem.create_link>`, respectively.
 
 ``create_file()`` also allows you to set the file mode and the file contents
 together with the encoding if needed. Alternatively, you can define a file
@@ -713,8 +752,10 @@ automatically.
 Access to files in the real file system
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 If you want to have read access to real files or directories, you can map
-them into the fake file system using ``add_real_file()``,
-``add_real_directory()``, ``add_real_symlink()`` and ``add_real_paths()``.
+them into the fake file system using :py:meth:`add_real_file()<pyfakefs.fake_filesystem.FakeFilesystem.add_real_file>`,
+:py:meth:`add_real_directory()<pyfakefs.fake_filesystem.FakeFilesystem.add_real_directory>`,
+:py:meth:`add_real_symlink()<pyfakefs.fake_filesystem.FakeFilesystem.add_real_symlink>` and
+:py:meth:`add_real_paths()<pyfakefs.fake_filesystem.FakeFilesystem.add_real_paths>`.
 They take a file path, a directory path, a symlink path, or a list of paths,
 respectively, and make them accessible from the fake file system. By
 default, the contents of the mapped files and directories are read only on
@@ -725,10 +766,13 @@ files are never changed.
 
 ``add_real_file()``, ``add_real_directory()`` and ``add_real_symlink()`` also
 allow you to map a file or a directory tree into another location in the
-fake filesystem via the argument ``target_path``.
+fake filesystem via the argument ``target_path``. If the target directory already exists
+in the fake filesystem, the directory contents are merged. If a file in the fake filesystem
+would be overwritten by a file from the real filesystem, an exception is raised.
 
 .. code:: python
 
+    import os
     from pyfakefs.fake_filesystem_unittest import TestCase
 
 
@@ -800,7 +844,7 @@ Handling mount points
 ~~~~~~~~~~~~~~~~~~~~~
 Under Linux and macOS, the root path (``/``) is the only mount point created
 in the fake file system. If you need support for more mount points, you can add
-them using ``add_mount_point()``.
+them using :py:meth:`add_mount_point()<pyfakefs.fake_filesystem.FakeFilesystem.add_mount_point>`.
 
 Under Windows, drives and UNC paths are internally handled as mount points.
 Adding a file or directory on another drive or UNC path automatically
@@ -818,7 +862,7 @@ Setting the file system size
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 If you need to know the file system size in your tests (for example for
 testing cleanup scripts), you can set the fake file system size using
-``set_disk_usage()``. By default, this sets the total size in bytes of the
+:py:meth:`set_disk_usage()<pyfakefs.fake_filesystem.FakeFilesystem.set_disk_usage>`. By default, this sets the total size in bytes of the
 root partition; if you add a path as parameter, the size will be related to
 the mount point (see above) the path is related to.
 
@@ -829,6 +873,8 @@ and you may fail to create new files if the fake file system is full.
 
 .. code:: python
 
+    import errno
+    import os
     from pyfakefs.fake_filesystem_unittest import TestCase
 
 
@@ -838,12 +884,13 @@ and you may fail to create new files if the fake file system is full.
             self.fs.set_disk_usage(100)
 
         def test_disk_full(self):
-            with open("/foo/bar.txt", "w") as f:
-                with self.assertRaises(OSError):
+            os.mkdir("/foo")
+            with self.assertRaises(OSError) as e:
+                with open("/foo/bar.txt", "w") as f:
                     f.write("a" * 200)
-                    f.flush()
+            self.assertEqual(errno.ENOSPC, e.exception.errno)
 
-To get the file system size, you may use ``get_disk_usage()``, which is
+To get the file system size, you may use :py:meth:`get_disk_usage()<pyfakefs.fake_filesystem.FakeFilesystem.get_disk_usage>`, which is
 modeled after ``shutil.disk_usage()``.
 
 Suspending patching
@@ -859,6 +906,8 @@ Here is an example that tests the usage with the ``pyfakefs`` pytest fixture:
 
 .. code:: python
 
+    import os
+    import tempfile
     from pyfakefs.fake_filesystem_unittest import Pause
 
 
@@ -877,6 +926,8 @@ Here is the same code using a context manager:
 
 .. code:: python
 
+    import os
+    import tempfile
     from pyfakefs.fake_filesystem_unittest import Pause
 
 
@@ -920,6 +971,7 @@ The following test works both under Windows and Linux:
 
 .. code:: python
 
+  import os
   from pyfakefs.fake_filesystem import OSType
 
 
@@ -928,6 +980,10 @@ The following test works both under Windows and Linux:
       assert r"C:\foo\bar" == os.path.join("C:\\", "foo", "bar")
       assert os.path.splitdrive(r"C:\foo\bar") == ("C:", r"\foo\bar")
       assert os.path.ismount("C:")
+
+.. note:: Only behavior not relying on OS-specific functionality is emulated on another system.
+  For example, if you use the Linux-specific functionality of extended attributes (``os.getxattr`` etc.)
+  in your code, you have to test this under Linux.
 
 Set file as inaccessible under Windows
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -940,12 +996,17 @@ possibility to use the ``force_unix_mode`` argument to ``FakeFilesystem.chmod``:
 
 .. code:: python
 
+    import pathlib
+    import pytest
+    from pyfakefs.fake_filesystem import OSType
+
+
     def test_is_file_for_unreadable_dir_windows(fs):
         fs.os = OSType.WINDOWS
         path = pathlib.Path("/foo/bar")
         fs.create_file(path)
         # normal chmod does not really set the mode to 0
-        self.fs.chmod("/foo", 0o000)
+        fs.chmod("/foo", 0o000)
         assert path.is_file()
         # but it does in forced UNIX mode
         fs.chmod("/foo", 0o000, force_unix_mode=True)
