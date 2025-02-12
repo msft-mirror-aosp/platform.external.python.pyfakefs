@@ -10,6 +10,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Shall provide tests to check performance overhead of pyfakefs."""
+
 import os
 import time
 import unittest
@@ -60,10 +61,10 @@ if os.environ.get("TEST_PERFORMANCE"):
         """
 
         def test_cached_time(self):
-            self.assertLess(SetupPerformanceTest.elapsed_time, 0.4)
+            self.assertLess(SetupPerformanceTest.elapsed_time, 0.18)
 
         def test_uncached_time(self):
-            self.assertLess(SetupNoCachePerformanceTest.elapsed_time, 6)
+            self.assertLess(SetupNoCachePerformanceTest.elapsed_time, 4)
 
     def test_setup(self):
         pass

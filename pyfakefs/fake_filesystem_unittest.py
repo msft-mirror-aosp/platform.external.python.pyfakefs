@@ -35,11 +35,12 @@ Existing unit tests that use the real file system can be retrofitted to use
 pyfakefs by simply changing their base class from `:py:class`unittest.TestCase`
 to `:py:class`pyfakefs.fake_filesystem_unittest.TestCase`.
 """
+
 import _io  # type:ignore[import]
-import builtins
 import doctest
 import functools
 import genericpath
+import glob
 import inspect
 import io
 import linecache
@@ -48,7 +49,12 @@ import shutil
 import sys
 import tempfile
 import tokenize
+import unittest
+import warnings
+from importlib import reload
 from importlib.abc import Loader, MetaPathFinder
+from importlib.machinery import ModuleSpec
+from importlib.util import spec_from_file_location, module_from_spec
 from types import ModuleType, TracebackType, FunctionType
 from typing import (
     Any,
@@ -65,10 +71,13 @@ from typing import (
     ItemsView,
     Sequence,
 )
-import unittest
-import warnings
 from unittest import TestSuite
 
+from pyfakefs import fake_filesystem, fake_io, fake_os, fake_open, fake_path, fake_file
+from pyfakefs import fake_filesystem_shutil
+from pyfakefs import fake_legacy_modules
+from pyfakefs import fake_pathlib
+from pyfakefs import mox3_stubout
 from pyfakefs.fake_filesystem import (
     set_uid,
     set_gid,
@@ -76,23 +85,49 @@ from pyfakefs.fake_filesystem import (
     PatchMode,
     FakeFilesystem,
 )
+from pyfakefs.fake_os import use_original_os
 from pyfakefs.helpers import IS_PYPY
+from pyfakefs.legacy_packages import pathlib2, scandir
 from pyfakefs.mox3_stubout import StubOutForTesting
-
-from importlib.machinery import ModuleSpec
-from importlib import reload
-
-from pyfakefs import fake_filesystem, fake_io, fake_os, fake_open, fake_path, fake_file
-from pyfakefs import fake_filesystem_shutil
-from pyfakefs import fake_pathlib
-from pyfakefs import mox3_stubout
-from pyfakefs.extra_packages import pathlib2, use_scandir
-
-if use_scandir:
-    from pyfakefs import fake_scandir
 
 OS_MODULE = "nt" if sys.platform == "win32" else "posix"
 PATH_MODULE = "ntpath" if sys.platform == "win32" else "posixpath"
+
+
+class TempfilePatcher:
+    """Handles tempfile patching for Posix systems."""
+
+    def __init__(self):
+        self.tempfile_cleanup = None
+
+    def start_patching(self):
+        if self.tempfile_cleanup is not None:
+            return
+        if sys.version_info >= (3, 12):
+
+            def cleanup(self_, windows=(os.name == "nt"), unlink=None):
+                self.tempfile_cleanup(self_, windows, unlink or os.unlink)
+
+            self.tempfile_cleanup = tempfile._TemporaryFileCloser.cleanup  # type: ignore[module-attr]
+            tempfile._TemporaryFileCloser.cleanup = cleanup  # type: ignore[module-attr]
+        elif sys.platform != "win32":
+
+            def close(self_, unlink=None):
+                self.tempfile_cleanup(self_, unlink or os.unlink)
+
+            self.tempfile_cleanup = tempfile._TemporaryFileCloser.close  # type: ignore[module-attr]
+            tempfile._TemporaryFileCloser.close = close  # type: ignore[module-attr]
+
+    def stop_patching(self):
+        if self.tempfile_cleanup is None:
+            return
+        if sys.version_info < (3, 12):
+            tempfile._TemporaryFileCloser.close = self.tempfile_cleanup  # type: ignore[module-attr]
+        else:
+            tempfile._TemporaryFileCloser.cleanup = self.tempfile_cleanup  # type: ignore[module-attr]
+        self.tempfile_cleanup = None
+        # reset the cached tempdir in tempfile
+        tempfile.tempdir = None
 
 
 def patchfs(
@@ -105,7 +140,8 @@ def patchfs(
     use_known_patches: bool = True,
     patch_open_code: PatchMode = PatchMode.OFF,
     patch_default_args: bool = False,
-    use_cache: bool = True
+    use_cache: bool = True,
+    use_dynamic_patch: bool = True,
 ) -> Callable:
     """Convenience decorator to use patcher with additional parameters in a
     test function.
@@ -133,6 +169,7 @@ def patchfs(
                 patch_open_code=patch_open_code,
                 patch_default_args=patch_default_args,
                 use_cache=use_cache,
+                use_dynamic_patch=use_dynamic_patch,
             ) as p:
                 args = list(args)
                 args.append(p.fs)
@@ -168,6 +205,7 @@ def load_doctests(
     use_known_patches: bool = True,
     patch_open_code: PatchMode = PatchMode.OFF,
     patch_default_args: bool = False,
+    use_dynamic_patch: bool = True,
 ) -> TestSuite:  # pylint:disable=unused-argument
     """Load the doctest tests for the specified module into unittest.
         Args:
@@ -187,6 +225,7 @@ def load_doctests(
             use_known_patches=use_known_patches,
             patch_open_code=patch_open_code,
             patch_default_args=patch_default_args,
+            use_dynamic_patch=use_dynamic_patch,
             is_doc_test=True,
         )
     assert Patcher.DOC_PATCHER is not None
@@ -207,7 +246,7 @@ class TestCaseMixin:
     modules by fake implementations.
 
     Attributes:
-        additional_skip_names: names of modules inside of which no module
+        additional_skip_names: names of modules where no module
             replacement shall be performed, in addition to the names in
             :py:attr:`fake_filesystem_unittest.Patcher.SKIPNAMES`.
             Instead of the module names, the modules themselves may be used.
@@ -220,7 +259,7 @@ class TestCaseMixin:
             fully qualified patched module names. Can be used to add patching
             of modules not provided by `pyfakefs`.
 
-    If you specify some of these attributes here and you have DocTests,
+    If you specify some of these attributes here, and you have DocTests,
     consider also specifying the same arguments to :py:func:`load_doctests`.
 
     Example usage in derived test classes::
@@ -266,6 +305,7 @@ class TestCaseMixin:
         patch_open_code: PatchMode = PatchMode.OFF,
         patch_default_args: bool = False,
         use_cache: bool = True,
+        use_dynamic_patch: bool = True,
     ) -> None:
         """Bind the file-related modules to the :py:class:`pyfakefs` fake file
         system instead of the real file system.  Also bind the fake `open()`
@@ -297,6 +337,7 @@ class TestCaseMixin:
             patch_open_code=patch_open_code,
             patch_default_args=patch_default_args,
             use_cache=use_cache,
+            use_dynamic_patch=use_dynamic_patch,
         )
 
         self._patcher.setUp()
@@ -313,6 +354,7 @@ class TestCaseMixin:
         patch_open_code: PatchMode = PatchMode.OFF,
         patch_default_args: bool = False,
         use_cache: bool = True,
+        use_dynamic_patch: bool = True,
     ) -> None:
         """Similar to :py:func:`setUpPyfakefs`, but as a class method that
         can be used in `setUpClass` instead of in `setUp`.
@@ -322,6 +364,8 @@ class TestCaseMixin:
         :py:func:`setUpPyfakefs` in the same class will not work correctly.
 
         .. note:: This method is only available from Python 3.8 onwards.
+        .. note:: If using `pytest` as testrunner, you need at least pytest 6.2
+            for this method to work.
         """
         if sys.version_info < (3, 8):
             raise NotImplementedError(
@@ -348,6 +392,7 @@ class TestCaseMixin:
             patch_open_code=patch_open_code,
             patch_default_args=patch_default_args,
             use_cache=use_cache,
+            use_dynamic_patch=use_dynamic_patch,
         )
 
         Patcher.PATCHER.setUp()
@@ -470,6 +515,13 @@ class Patcher:
         SKIPMODULES.add(posixpath)
         SKIPMODULES.add(fcntl)
 
+    # a list of modules detected at run-time
+    # each tool defines one or more module name prefixes for modules to be skipped
+    RUNTIME_SKIPMODULES = {
+        "pydevd": ["_pydevd_", "pydevd", "_pydev_"],  # Python debugger (PyCharm/VSCode)
+        "_jb_runner_tools": ["_jb_"],  # JetBrains tools
+    }
+
     # caches all modules that do not have file system modules or function
     # to speed up _find_modules
     CACHED_MODULES: Set[ModuleType] = set()
@@ -478,7 +530,7 @@ class Patcher:
     FS_DEFARGS: List[Tuple[FunctionType, int, Callable[..., Any]]] = []
     SKIPPED_FS_MODULES: Dict[str, Set[Tuple[ModuleType, str]]] = {}
 
-    assert None in SKIPMODULES, "sys.modules contains 'None' values;" " must skip them."
+    assert None in SKIPMODULES, "sys.modules contains 'None' values; must skip them."
 
     IS_WINDOWS = sys.platform in ("win32", "cygwin")
 
@@ -512,11 +564,12 @@ class Patcher:
         patch_open_code: PatchMode = PatchMode.OFF,
         patch_default_args: bool = False,
         use_cache: bool = True,
+        use_dynamic_patch: bool = True,
         is_doc_test: bool = False,
     ) -> None:
         """
         Args:
-            additional_skip_names: names of modules inside of which no module
+            additional_skip_names: names of modules where no module
                 replacement shall be performed, in addition to the names in
                 :py:attr:`fake_filesystem_unittest.Patcher.SKIPNAMES`.
                 Instead of the module names, the modules themselves
@@ -544,6 +597,9 @@ class Patcher:
                 cached between tests for performance reasons. As this is a new
                 feature, this argument allows to turn it off in case it
                 causes any problems.
+            use_dynamic_patch: If `True`, dynamic patching after setup is used
+                (for example for modules loaded locally inside of functions).
+                Can be switched off if it causes unwanted side effects.
         """
         self.is_doc_test = is_doc_test
         if is_doc_test:
@@ -556,18 +612,20 @@ class Patcher:
             set_uid(1)
             set_gid(1)
 
-        self._skip_names = self.SKIPNAMES.copy()
+        self.skip_names = self.SKIPNAMES.copy()
         # save the original open function for use in pytest plugin
         self.original_open = open
         self.patch_open_code = patch_open_code
-        self.fake_open: fake_open.FakeFileOpen
+        self.linecache_updatecache = None
+        self.linecache_checkcache = None
+        self.tempfile_patcher = TempfilePatcher()
 
         if additional_skip_names is not None:
             skip_names = [
                 cast(ModuleType, m).__name__ if inspect.ismodule(m) else cast(str, m)
                 for m in additional_skip_names
             ]
-            self._skip_names.update(skip_names)
+            self.skip_names.update(skip_names)
 
         self._fake_module_classes: Dict[str, Any] = {}
         self._unfaked_module_classes: Dict[str, Any] = {}
@@ -575,25 +633,27 @@ class Patcher:
         self._init_fake_module_classes()
 
         # reload tempfile under posix to patch default argument
-        self.modules_to_reload: List[ModuleType] = (
-            [] if sys.platform == "win32" else [tempfile]
-        )
+        self.modules_to_reload: List[ModuleType] = []
         if modules_to_reload is not None:
             self.modules_to_reload.extend(modules_to_reload)
         self.patch_default_args = patch_default_args
         self.use_cache = use_cache
+        self.use_dynamic_patch = use_dynamic_patch
+        self.cleanup_handlers: Dict[str, Callable[[str], bool]] = {}
 
         if use_known_patches:
             from pyfakefs.patched_packages import (
                 get_modules_to_patch,
                 get_classes_to_patch,
                 get_fake_module_classes,
+                get_cleanup_handlers,
             )
 
             modules_to_patch = modules_to_patch or {}
             modules_to_patch.update(get_modules_to_patch())
             self._class_modules.update(get_classes_to_patch())
             self._fake_module_classes.update(get_fake_module_classes())
+            self.cleanup_handlers.update(get_cleanup_handlers())
 
         if modules_to_patch is not None:
             for name, fake_module in modules_to_patch.items():
@@ -606,8 +666,8 @@ class Patcher:
             if patched_module_names != self.PATCHED_MODULE_NAMES:
                 self.__class__.PATCHED_MODULE_NAMES = patched_module_names
                 clear_cache = True
-            if self._skip_names != self.ADDITIONAL_SKIP_NAMES:
-                self.__class__.ADDITIONAL_SKIP_NAMES = self._skip_names
+            if self.skip_names != self.ADDITIONAL_SKIP_NAMES:
+                self.__class__.ADDITIONAL_SKIP_NAMES = self.skip_names
                 clear_cache = True
             if patch_default_args != self.PATCH_DEFAULT_ARGS:
                 self.__class__.PATCH_DEFAULT_ARGS = patch_default_args
@@ -628,6 +688,22 @@ class Patcher:
         self._isStale = True
         self._dyn_patcher: Optional[DynamicPatcher] = None
         self._patching = False
+        self._paused = False
+
+    def checkcache(self, filename=None):
+        """Calls the original linecache.checkcache making sure no fake OS calls
+        are used."""
+        with use_original_os():
+            return self.linecache_checkcache(filename)
+
+    def updatecache(self, filename, module_globals=None):
+        """Calls the original linecache.updatecache making sure no fake OS calls
+        are used."""
+        with use_original_os():
+            # workaround for updatecache problem with pytest under Windows, see #1096
+            if not filename.endswith(r"pytest.exe\__main__.py"):
+                return self.linecache_updatecache(filename, module_globals)
+            return []
 
     @classmethod
     def clear_fs_cache(cls) -> None:
@@ -642,6 +718,22 @@ class Patcher:
         """Clear the module cache (convenience instance method)."""
         self.__class__.clear_fs_cache()
 
+    def register_cleanup_handler(self, name: str, handler: Callable[[str], bool]):
+        """Register a handler for cleaning up a module after it had been loaded by
+        the dynamic patcher. This allows to handle modules that cannot be reloaded
+        without unwanted side effects.
+
+        Args:
+            name: The fully qualified module name.
+            handler: A callable that may do any module cleanup, or do nothing
+                and return `True` in case reloading shall be prevented.
+
+        Returns:
+            `True` if no further cleanup/reload shall occur after the handler is
+                executed, `False` if the cleanup/reload shall still happen.
+        """
+        self.cleanup_handlers[name] = handler
+
     def _init_fake_module_classes(self) -> None:
         # IMPORTANT TESTING NOTE: Whenever you add a new module below, test
         # it by adding an attribute in fixtures/module_with_attributes.py
@@ -653,9 +745,14 @@ class Patcher:
             "io": fake_io.FakeIoModule,
             "pathlib": fake_pathlib.FakePathlibModule,
         }
-        if IS_PYPY:
-            # in PyPy io.open, the module is referenced as _io
-            self._fake_module_classes["_io"] = fake_io.FakeIoModule
+        if sys.version_info >= (3, 13):
+            # for Python 3.13, we need both pathlib (path with __init__.py) and
+            # pathlib._local (has the actual implementation);
+            # depending on how pathlib is imported, either may be used
+            self._fake_module_classes["pathlib._local"] = fake_pathlib.FakePathlibModule
+        if IS_PYPY or sys.version_info >= (3, 12):
+            # in PyPy and later cpython versions, the module is referenced as _io
+            self._fake_module_classes["_io"] = fake_io.FakeIoModule2
         if sys.platform == "win32":
             self._fake_module_classes["nt"] = fake_path.FakeNtModule
         else:
@@ -665,15 +762,23 @@ class Patcher:
         # be contained in - this allows for alternative modules like
         # `pathlib` and `pathlib2`
         self._class_modules["Path"] = ["pathlib"]
+        if sys.version_info >= (3, 13):
+            self._class_modules["Path"].append("pathlib._local")
         self._unfaked_module_classes["pathlib"] = fake_pathlib.RealPathlibModule
+        if sys.version_info >= (3, 13):
+            self._unfaked_module_classes["pathlib._local"] = (
+                fake_pathlib.RealPathlibModule
+            )
         if pathlib2:
-            self._fake_module_classes["pathlib2"] = fake_pathlib.FakePathlibModule
+            self._fake_module_classes["pathlib2"] = (
+                fake_legacy_modules.FakePathlib2Module
+            )
             self._class_modules["Path"].append("pathlib2")
             self._unfaked_module_classes["pathlib2"] = fake_pathlib.RealPathlibModule
+        if scandir:
+            self._fake_module_classes["scandir"] = fake_legacy_modules.FakeScanDirModule
         self._fake_module_classes["Path"] = fake_pathlib.FakePathlibPathModule
         self._unfaked_module_classes["Path"] = fake_pathlib.RealPathlibPathModule
-        if use_scandir:
-            self._fake_module_classes["scandir"] = fake_scandir.FakeScanDirModule
 
     def _init_fake_module_functions(self) -> None:
         # handle patching function imported separately like
@@ -697,12 +802,12 @@ class Patcher:
         fake_module = fake_filesystem.FakePathModule
         for fct_name in fake_module.dir():
             module_attr = (getattr(fake_module, fct_name), PATH_MODULE)
-            self._fake_module_functions.setdefault(fct_name, {})[
-                "genericpath"
-            ] = module_attr
-            self._fake_module_functions.setdefault(fct_name, {})[
-                PATH_MODULE
-            ] = module_attr
+            self._fake_module_functions.setdefault(fct_name, {})["genericpath"] = (
+                module_attr
+            )
+            self._fake_module_functions.setdefault(fct_name, {})[PATH_MODULE] = (
+                module_attr
+            )
 
     def __enter__(self) -> "Patcher":
         """Context manager for usage outside of
@@ -804,10 +909,14 @@ class Patcher:
                 # see https://github.com/pytest-dev/py/issues/73
                 # and any other exception triggered by inspect.ismodule
                 if self.use_cache:
-                    self.__class__.CACHED_MODULES.add(module)
+                    try:
+                        self.__class__.CACHED_MODULES.add(module)
+                    except TypeError:
+                        # unhashable module - don't cache it
+                        pass
                 continue
             skipped = module in self.SKIPMODULES or any(
-                [sn.startswith(module.__name__) for sn in self._skip_names]
+                [sn.startswith(module.__name__) for sn in self.skip_names]
             )
             module_items = module.__dict__.copy().items()
 
@@ -851,11 +960,10 @@ class Patcher:
 
         self.fs = fake_filesystem.FakeFilesystem(patcher=self, create_temp_dir=True)
         self.fs.patch_open_code = self.patch_open_code
-        self.fake_open = fake_open.FakeFileOpen(self.fs)
         for name in self._fake_module_classes:
             self.fake_modules[name] = self._fake_module_classes[name](self.fs)
             if hasattr(self.fake_modules[name], "skip_names"):
-                self.fake_modules[name].skip_names = self._skip_names
+                self.fake_modules[name].skip_names = self.skip_names
         self.fake_modules[PATH_MODULE] = self.fake_modules["os"].path
         for name in self._unfaked_module_classes:
             self.unfaked_modules[name] = self._unfaked_module_classes[name]()
@@ -882,6 +990,15 @@ class Patcher:
         if self.has_fcopy_file:
             shutil._HAS_FCOPYFILE = False  # type: ignore[attr-defined]
 
+        # do not use the fd functions, as they may not be available in the target OS
+        if hasattr(shutil, "_use_fd_functions"):
+            shutil._use_fd_functions = False  # type: ignore[module-attr]
+        # in Python 3.14, _rmtree_impl is set at load time based on _use_fd_functions
+        # the safe version cannot be used at the moment as it used asserts of type
+        # 'assert func is os.rmtree', which do not work with the fake versions
+        if hasattr(shutil, "_rmtree_impl"):
+            shutil._rmtree_impl = shutil._rmtree_unsafe  # type: ignore[attr-defined]
+
         with warnings.catch_warnings():
             # ignore warnings, see #542 and #614
             warnings.filterwarnings("ignore")
@@ -899,16 +1016,38 @@ class Patcher:
     def start_patching(self) -> None:
         if not self._patching:
             self._patching = True
+            self._paused = False
+
+            if sys.version_info >= (3, 12):
+                # in linecache, 'os' is now imported locally, which involves the
+                # dynamic patcher, therefore we patch the affected functions
+                self.linecache_updatecache = linecache.updatecache
+                linecache.updatecache = self.updatecache
+                self.linecache_checkcache = linecache.checkcache
+                linecache.checkcache = self.checkcache
+
+            self.tempfile_patcher.start_patching()
 
             self.patch_modules()
             self.patch_functions()
             self.patch_defaults()
+            self._set_glob_os_functions()
 
             self._dyn_patcher = DynamicPatcher(self)
             sys.meta_path.insert(0, self._dyn_patcher)
             for module in self.modules_to_reload:
                 if sys.modules.get(module.__name__) is module:
                     reload(module)
+            if not self.use_dynamic_patch:
+                self._dyn_patcher.cleanup()
+                sys.meta_path.pop(0)
+
+    def _set_glob_os_functions(self):
+        # make sure the os functions cached in glob are patched
+        if sys.version_info >= (3, 13):
+            globber = glob._StringGlobber  # type: ignore[module-attr]
+            globber.lstat = staticmethod(os.lstat)
+            globber.scandir = staticmethod(os.scandir)
 
     def patch_functions(self) -> None:
         assert self._stubs is not None
@@ -922,17 +1061,30 @@ class Patcher:
                 self._stubs.smart_set(module, name, attr)
 
     def patch_modules(self) -> None:
+        skip_prefix_list = []
+        for rt_skip_module, prefixes in self.RUNTIME_SKIPMODULES.items():
+            if rt_skip_module in sys.modules:
+                skip_prefix_list.extend(prefixes)
+        skip_prefixes = tuple(skip_prefix_list)
+
         assert self._stubs is not None
         for name, modules in self.FS_MODULES.items():
             for module, attr in modules:
-                self._stubs.smart_set(module, name, self.fake_modules[attr])
+                try:
+                    if not skip_prefixes or not module.__name__.startswith(
+                        skip_prefixes
+                    ):
+                        self._stubs.smart_set(module, name, self.fake_modules[attr])
+                    elif attr in self.unfaked_modules:
+                        self._stubs.smart_set(module, name, self.unfaked_modules[attr])
+                except Exception:
+                    # handle the rare case that a module has no __name__
+                    pass
+
         for name, modules in self.SKIPPED_FS_MODULES.items():
             for module, attr in modules:
                 if attr in self.unfaked_modules:
                     self._stubs.smart_set(module, name, self.unfaked_modules[attr])
-        if sys.version_info >= (3, 12):
-            # workaround for patching open - does not work with skip modules
-            self._stubs.smart_set(builtins, "open", self.fake_open)
 
     def patch_defaults(self) -> None:
         for fct, idx, ft in self.FS_DEFARGS:
@@ -979,16 +1131,26 @@ class Patcher:
         else:
             self.__class__.PATCHER = None
 
-    def stop_patching(self) -> None:
+    def stop_patching(self, temporary=False) -> None:
         if self._patching:
             self._isStale = True
             self._patching = False
+            self._paused = temporary
             if self._stubs:
                 self._stubs.smart_unset_all()
             self.unset_defaults()
-            if self._dyn_patcher:
+            if self.use_dynamic_patch and self._dyn_patcher:
                 self._dyn_patcher.cleanup()
                 sys.meta_path.pop(0)
+            self.tempfile_patcher.stop_patching()
+            if self.linecache_updatecache is not None:
+                linecache.updatecache = self.linecache_updatecache
+                linecache.checkcache = self.linecache_checkcache
+            self._set_glob_os_functions()
+
+    @property
+    def is_patching(self):
+        return self._patching
 
     def unset_defaults(self) -> None:
         for fct, idx, ft in self.FS_DEFARGS:
@@ -1007,7 +1169,7 @@ class Patcher:
         Calling pause() twice is silently ignored.
 
         """
-        self.stop_patching()
+        self.stop_patching(temporary=True)
 
     def resume(self) -> None:
         """Resume the patching of the file system modules if `pause` has
@@ -1015,13 +1177,14 @@ class Patcher:
         executed in the fake file system.
         Does nothing if patching is not paused.
         """
-        self.start_patching()
+        if self._paused:
+            self.start_patching()
 
 
 class Pause:
     """Simple context manager that allows to pause/resume patching the
     filesystem. Patching is paused in the context manager, and resumed after
-    going out of it's scope.
+    going out of its scope.
     """
 
     def __init__(self, caller: Union[Patcher, TestCaseMixin, FakeFilesystem]):
@@ -1063,6 +1226,7 @@ class DynamicPatcher(MetaPathFinder, Loader):
         self.sysmodules = {}
         self.modules = self._patcher.fake_modules
         self._loaded_module_names: Set[str] = set()
+        self.cleanup_handlers = patcher.cleanup_handlers
 
         # remove all modules that have to be patched from `sys.modules`,
         # otherwise the find_... methods will not be called
@@ -1083,21 +1247,40 @@ class DynamicPatcher(MetaPathFinder, Loader):
         reloaded_module_names = [
             module.__name__ for module in self._patcher.modules_to_reload
         ]
-        # Dereference all modules loaded during the test so they will reload on
-        # the next use, ensuring that no faked modules are referenced after the
-        # test.
+        # Delete all modules loaded during the test, ensuring that
+        # they are reloaded after the test.
         for name in self._loaded_module_names:
             if name in sys.modules and name not in reloaded_module_names:
+                if name in self.cleanup_handlers and self.cleanup_handlers[name](name):
+                    continue
                 del sys.modules[name]
 
     def needs_patch(self, name: str) -> bool:
-        """Check if the module with the given name shall be replaced."""
+        """Checks if the module with the given name shall be replaced."""
         if name not in self.modules:
             self._loaded_module_names.add(name)
             return False
         if name in sys.modules and type(sys.modules[name]) is self.modules[name]:
             return False
         return True
+
+    def fake_module_path(self, name: str) -> str:
+        """Checks if the module with the given name is a module existing in the fake
+        filesystem and returns its path in this case.
+        """
+        fs = self._patcher.fs
+        # we assume that the module name is the absolute module path
+        if fs is not None:
+            base_path = name.replace(".", fs.path_separator)
+            for path in sys.path:
+                module_path = fs.joinpaths(path, base_path)
+                py_module_path = module_path + ".py"
+                if fs.exists(py_module_path):
+                    return fs.absnormpath(py_module_path)
+                init_path = fs.joinpaths(module_path, "__init__.py")
+                if fs.exists(init_path):
+                    return fs.absnormpath(init_path)
+        return ""
 
     def find_spec(
         self,
@@ -1108,6 +1291,15 @@ class DynamicPatcher(MetaPathFinder, Loader):
         """Module finder."""
         if self.needs_patch(fullname):
             return ModuleSpec(fullname, self)
+        if self._patcher.patch_open_code != PatchMode.OFF:
+            # handle modules created in the fake filesystem
+            module_path = self.fake_module_path(fullname)
+            if module_path:
+                spec = spec_from_file_location(fullname, module_path)
+                if spec:
+                    module = module_from_spec(spec)
+                    sys.modules[fullname] = module
+                    return ModuleSpec(fullname, self)
         return None
 
     def load_module(self, fullname: str) -> ModuleType:

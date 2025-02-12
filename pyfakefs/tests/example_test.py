@@ -32,8 +32,12 @@ import sys
 import unittest
 
 from pyfakefs import fake_filesystem_unittest
-from pyfakefs.extra_packages import use_scandir_package
+from pyfakefs.legacy_packages import scandir
 from pyfakefs.tests import example  # The module under test
+
+
+# Work around pyupgrade auto-rewriting `io.open()` to `open()`.
+io_open = io.open
 
 
 def load_tests(loader, tests, ignore):
@@ -62,7 +66,7 @@ class TestExample(fake_filesystem_unittest.TestCase):  # pylint: disable=R0904
 
         # This is before setUpPyfakefs(), so still using the real file system
         self.filepath = os.path.realpath(__file__)
-        with io.open(self.filepath, "rb") as f:
+        with io_open(self.filepath, "rb") as f:
             self.real_contents = f.read()
 
         self.setUpPyfakefs()
@@ -85,7 +89,7 @@ class TestExample(fake_filesystem_unittest.TestCase):  # pylint: disable=R0904
 
     def test_delete_file(self):
         """Test example.delete_file() which uses `os.remove()`."""
-        self.fs.create_file("/test/full.txt", contents="First line\n" "Second Line\n")
+        self.fs.create_file("/test/full.txt", contents="First line\nSecond Line\n")
         self.assertTrue(os.path.exists("/test/full.txt"))
         example.delete_file("/test/full.txt")
         self.assertFalse(os.path.exists("/test/full.txt"))
@@ -143,9 +147,7 @@ class TestExample(fake_filesystem_unittest.TestCase):  # pylint: disable=R0904
         self.assertTrue(entries[1].is_symlink())
         self.assertTrue(entries[2].is_file())
 
-    @unittest.skipIf(
-        not use_scandir_package, "Testing only if scandir module is installed"
-    )
+    @unittest.skipIf(scandir is None, "Testing only if scandir module is installed")
     def test_scandir_scandir(self):
         """Test example.scandir() which uses `scandir.scandir()`.
 

@@ -12,13 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Uses :py:class:`FakeIoModule` to provide a
-    fake ``io`` module replacement.
+"""Uses :py:class:`FakeIoModule` to provide a
+fake ``io`` module replacement.
 """
+
+import _io  # pytype: disable=import-error
 import io
-import os
 import sys
-import traceback
 from enum import Enum
 from typing import (
     List,
@@ -32,8 +32,8 @@ from typing import (
 )
 
 from pyfakefs.fake_file import AnyFileWrapper
-from pyfakefs.fake_open import FakeFileOpen
-from pyfakefs.helpers import IS_PYPY
+from pyfakefs.fake_open import fake_open
+from pyfakefs.helpers import IS_PYPY, is_called_from_skipped_module
 
 if TYPE_CHECKING:
     from pyfakefs.fake_filesystem import FakeFilesystem
@@ -90,32 +90,17 @@ class FakeIoModule:
         """Redirect the call to FakeFileOpen.
         See FakeFileOpen.call() for description.
         """
-        # workaround for built-in open called from skipped modules (see #552)
-        # as open is not imported explicitly, we cannot patch it for
-        # specific modules; instead we check if the caller is a skipped
-        # module (should work in most cases)
-        stack = traceback.extract_stack(limit=2)
-        module_name = os.path.splitext(stack[0].filename)[0]
-        module_name = module_name.replace(os.sep, ".")
-        if any(
-            [
-                module_name == sn or module_name.endswith("." + sn)
-                for sn in self.skip_names
-            ]
-        ):
-            return io.open(  # pytype: disable=wrong-arg-count
-                file,
-                mode,
-                buffering,
-                encoding,
-                errors,
-                newline,
-                closefd,
-                opener,
-            )
-        fake_open = FakeFileOpen(self.filesystem)
         return fake_open(
-            file, mode, buffering, encoding, errors, newline, closefd, opener
+            self.filesystem,
+            self.skip_names,
+            file,
+            mode,
+            buffering,
+            encoding,
+            errors,
+            newline,
+            closefd,
+            opener,
         )
 
     if sys.version_info >= (3, 8):
@@ -141,6 +126,18 @@ class FakeIoModule:
     def __getattr__(self, name):
         """Forwards any unfaked calls to the standard io module."""
         return getattr(self._io_module, name)
+
+
+class FakeIoModule2(FakeIoModule):
+    """Similar to ``FakeIoModule``, but fakes `_io` instead of `io`."""
+
+    def __init__(self, filesystem: "FakeFilesystem"):
+        """
+        Args:
+            filesystem: FakeFilesystem used to provide file system information.
+        """
+        super().__init__(filesystem)
+        self._io_module = _io
 
 
 if sys.platform != "win32":
@@ -182,6 +179,20 @@ if sys.platform != "win32":
             self, fd: int, cmd: int, len: int = 0, start: int = 0, whence=0
         ) -> Any:
             pass
+
+        def __getattribute__(self, name):
+            """Prevents patching of skipped modules."""
+            fs: FakeFilesystem = object.__getattribute__(self, "filesystem")
+            fnctl_module = object.__getattribute__(self, "_fcntl_module")
+            if fs.patcher:
+                if is_called_from_skipped_module(
+                    skip_names=fs.patcher.skip_names,
+                    case_sensitive=fs.is_case_sensitive,
+                ):
+                    # remove the `self` argument for FakeOsModule methods
+                    return getattr(fnctl_module, name)
+
+            return object.__getattribute__(self, name)
 
         def __getattr__(self, name):
             """Forwards any unfaked calls to the standard fcntl module."""

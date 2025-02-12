@@ -61,13 +61,13 @@ def create_file(path):
     >>> create_file('/test/file.txt')
     >>> os.path.exists('/test/file.txt')
     True
-    >>> with open('/test/file.txt') as f:
+    >>> with open('/test/file.txt', encoding='utf8') as f:
     ...     f.readlines()
     ["This is test file '/test/file.txt'.\\n", \
 'It was created using open().\\n']
     """
-    with open(path, "w") as f:
-        f.write("This is test file '{0}'.\n".format(path))
+    with open(path, "w", encoding="utf8") as f:
+        f.write(f"This is test file '{path}'.\n")
         f.write("It was created using open().\n")
 
 

@@ -12,12 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""A fake open() function replacement. See ``fake_filesystem`` for usage.
-"""
+"""A fake open() function replacement. See ``fake_filesystem`` for usage."""
+
 import errno
+import io
 import os
 import sys
-from collections import namedtuple
 from stat import (
     S_ISDIR,
 )
@@ -29,6 +29,9 @@ from typing import (
     cast,
     AnyStr,
     TYPE_CHECKING,
+    Callable,
+    IO,
+    List,
 )
 
 from pyfakefs import helpers
@@ -40,19 +43,19 @@ from pyfakefs.fake_file import (
 )
 from pyfakefs.helpers import (
     AnyString,
+    is_called_from_skipped_module,
     is_root,
     PERM_READ,
     PERM_WRITE,
+    _OpenModes,
 )
 
 if TYPE_CHECKING:
     from pyfakefs.fake_filesystem import FakeFilesystem
 
 
-_OpenModes = namedtuple(
-    "_OpenModes",
-    "must_exist can_read can_write truncate append must_not_exist",
-)
+# Work around pyupgrade auto-rewriting `io.open()` to `open()`.
+io_open = io.open
 
 _OPEN_MODE_MAP = {
     # mode name:(file must exist, can read, can write,
@@ -66,6 +69,42 @@ _OPEN_MODE_MAP = {
     "x": (False, False, True, False, False, True),
     "x+": (False, True, True, False, False, True),
 }
+
+
+def fake_open(
+    filesystem: "FakeFilesystem",
+    skip_names: List[str],
+    file: Union[AnyStr, int],
+    mode: str = "r",
+    buffering: int = -1,
+    encoding: Optional[str] = None,
+    errors: Optional[str] = None,
+    newline: Optional[str] = None,
+    closefd: bool = True,
+    opener: Optional[Callable] = None,
+) -> Union[AnyFileWrapper, IO[Any]]:
+    """Redirect the call to FakeFileOpen.
+    See FakeFileOpen.call() for description.
+    """
+    if is_called_from_skipped_module(
+        skip_names=skip_names,
+        case_sensitive=filesystem.is_case_sensitive,
+        check_open_code=sys.version_info >= (3, 12),
+    ):
+        return io_open(  # pytype: disable=wrong-arg-count
+            file,
+            mode,
+            buffering,
+            encoding,
+            errors,
+            newline,
+            closefd,
+            opener,
+        )
+    fake_file_open = FakeFileOpen(filesystem)
+    return fake_file_open(
+        file, mode, buffering, encoding, errors, newline, closefd, opener
+    )
 
 
 class FakeFileOpen:
@@ -148,16 +187,22 @@ class FakeFileOpen:
             raise ValueError("binary mode doesn't take an encoding argument")
 
         newline, open_modes = self._handle_file_mode(mode, newline, open_modes)
+        opened_as_fd = isinstance(file_, int)
 
         # the pathlib opener is defined in a Path instance that may not be
         # patched under some circumstances; as it just calls standard open(),
         # we may ignore it, as it would not change the behavior
-        if opener is not None and opener.__module__ != "pathlib":
+        if opener is not None and opener.__module__ not in (
+            "pathlib",
+            "pathlib._local",
+        ):
             # opener shall return a file descriptor, which will be handled
             # here as if directly passed
             file_ = opener(file_, self._open_flags_from_open_modes(open_modes))
 
-        file_object, file_path, filedes, real_path = self._handle_file_arg(file_)
+        file_object, file_path, filedes, real_path, can_write = self._handle_file_arg(
+            file_
+        )
         if file_object is None and file_path is None:
             # file must be a fake pipe wrapper, find it...
             if (
@@ -176,7 +221,7 @@ class FakeFileOpen:
                 existing_wrapper.can_write,
                 mode,
             )
-            file_des = self.filesystem._add_open_file(wrapper)
+            file_des = self.filesystem.add_open_file(wrapper)
             wrapper.filedes = file_des
             return wrapper
 
@@ -197,7 +242,11 @@ class FakeFileOpen:
 
         assert real_path is not None
         file_object = self._init_file_object(
-            file_object, file_path, open_modes, real_path
+            file_object,
+            file_path,
+            open_modes,
+            real_path,
+            check_file_permission=not opened_as_fd,
         )
 
         if S_ISDIR(file_object.st_mode):
@@ -218,7 +267,7 @@ class FakeFileOpen:
         fakefile = FakeFileWrapper(
             file_object,
             file_path,
-            update=open_modes.can_write,
+            update=open_modes.can_write and can_write,
             read=open_modes.can_read,
             append=open_modes.append,
             delete_on_close=self._delete_on_close,
@@ -230,6 +279,7 @@ class FakeFileOpen:
             errors=errors,
             buffering=buffering,
             raw_io=self.raw_io,
+            opened_as_fd=opened_as_fd,
         )
         if filedes is not None:
             fakefile.filedes = filedes
@@ -238,7 +288,7 @@ class FakeFileOpen:
             assert open_files_list is not None
             open_files_list.append(fakefile)
         else:
-            fakefile.filedes = self.filesystem._add_open_file(fakefile)
+            fakefile.filedes = self.filesystem.add_open_file(fakefile)
         return fakefile
 
     @staticmethod
@@ -267,11 +317,19 @@ class FakeFileOpen:
         file_path: AnyStr,
         open_modes: _OpenModes,
         real_path: AnyString,
+        check_file_permission: bool,
     ) -> FakeFile:
         if file_object:
-            if not is_root() and (
-                (open_modes.can_read and not file_object.st_mode & PERM_READ)
-                or (open_modes.can_write and not file_object.st_mode & PERM_WRITE)
+            if (
+                check_file_permission
+                and not is_root()
+                and (
+                    (open_modes.can_read and not file_object.has_permission(PERM_READ))
+                    or (
+                        open_modes.can_write
+                        and not file_object.has_permission(PERM_WRITE)
+                    )
+                )
             ):
                 self.filesystem.raise_os_error(errno.EACCES, file_path)
             if open_modes.can_write:
@@ -304,29 +362,35 @@ class FakeFileOpen:
 
     def _handle_file_arg(
         self, file_: Union[AnyStr, int]
-    ) -> Tuple[Optional[FakeFile], Optional[AnyStr], Optional[int], Optional[AnyStr]]:
+    ) -> Tuple[
+        Optional[FakeFile], Optional[AnyStr], Optional[int], Optional[AnyStr], bool
+    ]:
         file_object = None
         if isinstance(file_, int):
             # opening a file descriptor
             filedes: int = file_
             wrapper = self.filesystem.get_open_file(filedes)
+            can_write = True
             if isinstance(wrapper, FakePipeWrapper):
-                return None, None, filedes, None
+                return None, None, filedes, None, can_write
             if isinstance(wrapper, FakeFileWrapper):
                 self._delete_on_close = wrapper.delete_on_close
+                can_write = wrapper.allow_update
+
             file_object = cast(
                 FakeFile, self.filesystem.get_open_file(filedes).get_object()
             )
             assert file_object is not None
             path = file_object.name
-            return (
+            return (  # pytype: disable=bad-return-type
                 file_object,
                 cast(AnyStr, path),  # pytype: disable=invalid-annotation
                 filedes,
                 cast(AnyStr, path),  # pytype: disable=invalid-annotation
+                can_write,
             )
 
-        # open a file file by path
+        # open a file by path
         file_path = cast(AnyStr, file_)  # pytype: disable=invalid-annotation
         if file_path == self.filesystem.dev_null.name:
             file_object = self.filesystem.dev_null
@@ -337,7 +401,7 @@ class FakeFileOpen:
                 file_object = self.filesystem.get_object_from_normpath(
                     real_path, check_read_perm=False
                 )
-        return file_object, file_path, None, real_path
+        return file_object, file_path, None, real_path, True
 
     def _handle_file_mode(
         self,

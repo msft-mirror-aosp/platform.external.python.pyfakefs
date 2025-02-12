@@ -11,6 +11,7 @@
 # limitations under the License.
 
 """Unit tests for file timestamp updates."""
+
 import time
 import unittest
 from collections import namedtuple
@@ -60,14 +61,14 @@ class FakeStatTestBase(RealFsTestCase):
 
     def open_close_new_file(self):
         with self.mock_time():
-            with self.open(self.file_path, self.mode):
+            with self.open(self.file_path, self.mode, encoding="utf8"):
                 created = self.stat_time(self.file_path)
             closed = self.stat_time(self.file_path)
             return created, closed
 
     def open_write_close_new_file(self):
         with self.mock_time():
-            with self.open(self.file_path, self.mode) as f:
+            with self.open(self.file_path, self.mode, encoding="utf8") as f:
                 created = self.stat_time(self.file_path)
                 f.write("foo")
                 written = self.stat_time(self.file_path)
@@ -80,7 +81,7 @@ class FakeStatTestBase(RealFsTestCase):
             self.create_file(self.file_path)
 
             before = self.stat_time(self.file_path)
-            with self.open(self.file_path, self.mode):
+            with self.open(self.file_path, self.mode, encoding="utf8"):
                 opened = self.stat_time(self.file_path)
             closed = self.stat_time(self.file_path)
 
@@ -91,7 +92,7 @@ class FakeStatTestBase(RealFsTestCase):
             self.create_file(self.file_path)
 
             before = self.stat_time(self.file_path)
-            with self.open(self.file_path, self.mode) as f:
+            with self.open(self.file_path, self.mode, encoding="utf8") as f:
                 opened = self.stat_time(self.file_path)
                 f.write("foo")
                 written = self.stat_time(self.file_path)
@@ -104,7 +105,7 @@ class FakeStatTestBase(RealFsTestCase):
             self.create_file(self.file_path)
 
             before = self.stat_time(self.file_path)
-            with self.open(self.file_path, self.mode) as f:
+            with self.open(self.file_path, self.mode, encoding="utf8") as f:
                 opened = self.stat_time(self.file_path)
                 f.flush()
                 flushed = self.stat_time(self.file_path)
@@ -117,7 +118,7 @@ class FakeStatTestBase(RealFsTestCase):
             self.create_file(self.file_path)
 
             before = self.stat_time(self.file_path)
-            with self.open(self.file_path, self.mode) as f:
+            with self.open(self.file_path, self.mode, encoding="utf8") as f:
                 opened = self.stat_time(self.file_path)
                 f.write("foo")
                 written = self.stat_time(self.file_path)
@@ -132,7 +133,7 @@ class FakeStatTestBase(RealFsTestCase):
             self.create_file(self.file_path)
 
             before = self.stat_time(self.file_path)
-            with self.open(self.file_path, "r") as f:
+            with self.open(self.file_path, "r", encoding="utf8") as f:
                 opened = self.stat_time(self.file_path)
                 f.read()
                 read = self.stat_time(self.file_path)
@@ -144,7 +145,7 @@ class FakeStatTestBase(RealFsTestCase):
 
     def open_read_close_new_file(self):
         with self.mock_time():
-            with self.open(self.file_path, self.mode) as f:
+            with self.open(self.file_path, self.mode, encoding="utf8") as f:
                 created = self.stat_time(self.file_path)
                 f.read()
                 read = self.stat_time(self.file_path)
@@ -157,7 +158,7 @@ class FakeStatTestBase(RealFsTestCase):
             self.create_file(self.file_path)
 
             before = self.stat_time(self.file_path)
-            with self.open(self.file_path, self.mode) as f:
+            with self.open(self.file_path, self.mode, encoding="utf8") as f:
                 opened = self.stat_time(self.file_path)
                 f.read()
                 read = self.stat_time(self.file_path)
@@ -388,7 +389,7 @@ class FakeStatTestBase(RealFsTestCase):
 
 class TestFakeModeW(FakeStatTestBase):
     def setUp(self):
-        super(TestFakeModeW, self).setUp()
+        super().setUp()
         self.mode = "w"
 
     def test_open_close_new_file(self):
@@ -410,7 +411,7 @@ class TestFakeModeW(FakeStatTestBase):
         self.check_open_write_flush_close_w_mode()
 
     def test_read_raises(self):
-        with self.open(self.file_path, "w") as f:
+        with self.open(self.file_path, "w", encoding="utf8") as f:
             with self.assertRaises(OSError):
                 f.read()
 
@@ -422,7 +423,7 @@ class TestRealModeW(TestFakeModeW):
 
 class TestFakeModeWPlus(FakeStatTestBase):
     def setUp(self):
-        super(TestFakeModeWPlus, self).setUp()
+        super().setUp()
         self.mode = "w+"
 
     def test_open_close_new_file(self):
@@ -475,7 +476,7 @@ class TestRealModeWPlus(TestFakeModeWPlus):
 
 class TestFakeModeA(FakeStatTestBase):
     def setUp(self):
-        super(TestFakeModeA, self).setUp()
+        super().setUp()
         self.mode = "a"
 
     def test_open_close_new_file(self):
@@ -497,7 +498,7 @@ class TestFakeModeA(FakeStatTestBase):
         self.check_open_write_flush_close_non_w_mode()
 
     def test_read_raises(self):
-        with self.open(self.file_path, "a") as f:
+        with self.open(self.file_path, "a", encoding="utf8") as f:
             with self.assertRaises(OSError):
                 f.read()
 
@@ -509,7 +510,7 @@ class TestRealModeA(TestFakeModeA):
 
 class TestFakeModeAPlus(FakeStatTestBase):
     def setUp(self):
-        super(TestFakeModeAPlus, self).setUp()
+        super().setUp()
         self.mode = "a+"
 
     def test_open_close_new_file(self):
@@ -544,7 +545,7 @@ class TestRealModeAPlus(TestFakeModeAPlus):
 
 class TestFakeModeR(FakeStatTestBase):
     def setUp(self):
-        super(TestFakeModeR, self).setUp()
+        super().setUp()
         self.mode = "r"
 
     def test_open_close(self):
@@ -591,7 +592,7 @@ class TestRealModeR(TestFakeModeR):
 
 class TestFakeModeRPlus(FakeStatTestBase):
     def setUp(self):
-        super(TestFakeModeRPlus, self).setUp()
+        super().setUp()
         self.mode = "r+"
 
     def test_open_close(self):
