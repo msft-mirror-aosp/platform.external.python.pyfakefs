@@ -11,14 +11,22 @@
 # limitations under the License.
 
 """Helper classes use for fake file system implementation."""
+
+import ctypes
+import importlib
 import io
 import locale
 import os
 import platform
 import stat
 import sys
+import sysconfig
 import time
+import traceback
+from collections import namedtuple
 from copy import copy
+from dataclasses import dataclass
+from enum import Enum
 from stat import S_IFLNK
 from typing import Union, Optional, Any, AnyStr, overload, cast
 
@@ -36,9 +44,22 @@ PERM_DEF = 0o777  # Default permission bits.
 PERM_DEF_FILE = 0o666  # Default permission bits (regular file)
 PERM_ALL = 0o7777  # All permission bits.
 
+STDLIB_PATH = os.path.realpath(sysconfig.get_path("stdlib"))
+PYFAKEFS_PATH = os.path.dirname(__file__)
+PYFAKEFS_TEST_PATHS = [
+    os.path.join(PYFAKEFS_PATH, "tests"),
+    os.path.join(PYFAKEFS_PATH, "pytest_tests"),
+]
+
+_OpenModes = namedtuple(
+    "_OpenModes",
+    "must_exist can_read can_write truncate append must_not_exist",
+)
+
 if sys.platform == "win32":
-    USER_ID = 1
-    GROUP_ID = 1
+    fake_id = 0 if ctypes.windll.shell32.IsUserAnAdmin() else 1
+    USER_ID = fake_id
+    GROUP_ID = fake_id
 else:
     USER_ID = os.getuid()
     GROUP_ID = os.getgid()
@@ -80,8 +101,9 @@ def set_gid(gid: int) -> None:
 def reset_ids() -> None:
     """Set the global user ID and group ID back to default values."""
     if sys.platform == "win32":
-        set_uid(1)
-        set_gid(1)
+        reset_id = 0 if ctypes.windll.shell32.IsUserAnAdmin() else 1
+        set_uid(reset_id)
+        set_gid(reset_id)
     else:
         set_uid(os.getuid())
         set_gid(os.getgid())
@@ -109,17 +131,21 @@ def is_unicode_string(val: Any) -> bool:
     return hasattr(val, "encode")
 
 
-@overload
-def make_string_path(dir_name: AnyStr) -> AnyStr:
-    ...
+def get_locale_encoding():
+    if sys.version_info >= (3, 11):
+        return locale.getencoding()
+    return locale.getpreferredencoding(False)
 
 
 @overload
-def make_string_path(dir_name: os.PathLike) -> str:
-    ...
+def make_string_path(dir_name: AnyStr) -> AnyStr: ...
 
 
-def make_string_path(dir_name: AnyPath) -> AnyStr:
+@overload
+def make_string_path(dir_name: os.PathLike) -> str: ...
+
+
+def make_string_path(dir_name: AnyPath) -> AnyStr:  # type: ignore[type-var]
     return cast(AnyStr, os.fspath(dir_name))  # pytype: disable=invalid-annotation
 
 
@@ -127,7 +153,7 @@ def to_string(path: Union[AnyStr, Union[str, bytes]]) -> str:
     """Return the string representation of a byte string using the preferred
     encoding, or the string itself if path is a str."""
     if isinstance(path, bytes):
-        return path.decode(locale.getpreferredencoding(False))
+        return path.decode(get_locale_encoding())
     return path
 
 
@@ -135,7 +161,7 @@ def to_bytes(path: Union[AnyStr, Union[str, bytes]]) -> bytes:
     """Return the bytes representation of a string using the preferred
     encoding, or the byte string itself if path is a byte string."""
     if isinstance(path, str):
-        return bytes(path, locale.getpreferredencoding(False))
+        return bytes(path, get_locale_encoding())
     return path
 
 
@@ -158,18 +184,15 @@ def now():
 
 
 @overload
-def matching_string(matched: bytes, string: AnyStr) -> bytes:
-    ...
+def matching_string(matched: bytes, string: AnyStr) -> bytes: ...
 
 
 @overload
-def matching_string(matched: str, string: AnyStr) -> str:
-    ...
+def matching_string(matched: str, string: AnyStr) -> str: ...
 
 
 @overload
-def matching_string(matched: AnyStr, string: None) -> None:
-    ...
+def matching_string(matched: AnyStr, string: None) -> None: ...
 
 
 def matching_string(  # type: ignore[misc]
@@ -181,8 +204,44 @@ def matching_string(  # type: ignore[misc]
     if string is None:
         return string
     if isinstance(matched, bytes) and isinstance(string, str):
-        return string.encode(locale.getpreferredencoding(False))
+        return string.encode(get_locale_encoding())
     return string  # pytype: disable=bad-return-type
+
+
+@dataclass
+class FSProperties:
+    sep: str
+    altsep: Optional[str]
+    pathsep: str
+    linesep: str
+    devnull: str
+
+
+# pure POSIX file system properties, for use with PosixPath
+POSIX_PROPERTIES = FSProperties(
+    sep="/",
+    altsep=None,
+    pathsep=":",
+    linesep="\n",
+    devnull="/dev/null",
+)
+
+# pure Windows file system properties, for use with WindowsPath
+WINDOWS_PROPERTIES = FSProperties(
+    sep="\\",
+    altsep="/",
+    pathsep=";",
+    linesep="\r\n",
+    devnull="NUL",
+)
+
+
+class FSType(Enum):
+    """Defines which file system properties to use."""
+
+    DEFAULT = 0  # use current OS file system + modifications in fake file system
+    POSIX = 1  # pure POSIX properties, for use in PosixPath
+    WINDOWS = 2  # pure Windows properties, for use in WindowsPath
 
 
 class FakeStatResult:
@@ -308,7 +367,7 @@ class FakeStatResult:
     def st_file_attributes(self) -> int:
         if not self.is_windows:
             raise AttributeError(
-                "module 'os.stat_result' " "has no attribute 'st_file_attributes'"
+                "module 'os.stat_result' has no attribute 'st_file_attributes'"
             )
         mode = 0
         st_mode = self.st_mode
@@ -326,7 +385,7 @@ class FakeStatResult:
     def st_reparse_tag(self) -> int:
         if not self.is_windows or sys.version_info < (3, 8):
             raise AttributeError(
-                "module 'os.stat_result' " "has no attribute 'st_reparse_tag'"
+                "module 'os.stat_result' has no attribute 'st_reparse_tag'"
             )
         if self.st_mode & stat.S_IFLNK:
             return stat.IO_REPARSE_TAG_SYMLINK  # type: ignore[attr-defined]
@@ -418,3 +477,75 @@ class TextBufferIO(io.TextIOWrapper):
 
     def putvalue(self, value: bytes) -> None:
         self._bytestream.write(value)
+
+
+def is_called_from_skipped_module(
+    skip_names: list, case_sensitive: bool, check_open_code: bool = False
+) -> bool:
+    def starts_with(path, string):
+        if case_sensitive:
+            return path.startswith(string)
+        return path.lower().startswith(string.lower())
+
+    # in most cases we don't have skip names and won't need the overhead
+    # of analyzing the traceback, except when checking for open_code
+    if not skip_names and not check_open_code:
+        return False
+
+    stack = traceback.extract_stack()
+
+    # handle the case that we try to call the original `open_code`
+    # (since Python 3.12)
+    # The stack in this case is:
+    # -1: helpers.is_called_from_skipped_module: 'stack = traceback.extract_stack()'
+    # -2: fake_open.fake_open: 'if is_called_from_skipped_module('
+    # -3: fake_io.open: 'return fake_open('
+    # -4: fake_io.open_code : 'return self._io_module.open_code(path)'
+    if (
+        check_open_code
+        and stack[-4].name == "open_code"
+        and stack[-4].line == "return self._io_module.open_code(path)"
+    ):
+        return True
+
+    if not skip_names:
+        return False
+
+    caller_filename = next(
+        (
+            frame.filename
+            for frame in stack[::-1]
+            if not frame.filename.startswith("<frozen ")
+            and not starts_with(frame.filename, STDLIB_PATH)
+            and (
+                not starts_with(frame.filename, PYFAKEFS_PATH)
+                or any(
+                    starts_with(frame.filename, test_path)
+                    for test_path in PYFAKEFS_TEST_PATHS
+                )
+            )
+        ),
+        None,
+    )
+
+    if caller_filename:
+        caller_module_name = os.path.splitext(caller_filename)[0]
+        caller_module_name = caller_module_name.replace(os.sep, ".")
+
+        if any(
+            [
+                caller_module_name == sn or caller_module_name.endswith("." + sn)
+                for sn in skip_names
+            ]
+        ):
+            return True
+    return False
+
+
+def reload_cleanup_handler(name):
+    """Cleanup handler that reloads the module with the given name.
+    Maybe needed in cases where a module is imported locally.
+    """
+    if name in sys.modules:
+        importlib.reload(sys.modules[name])
+    return True
