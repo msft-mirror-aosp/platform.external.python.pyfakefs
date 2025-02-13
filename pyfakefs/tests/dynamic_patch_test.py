@@ -13,6 +13,7 @@
 """
 Tests for patching modules loaded after `setUpPyfakefs()`.
 """
+
 import pathlib
 import unittest
 
@@ -27,7 +28,7 @@ class TestPyfakefsUnittestBase(fake_filesystem_unittest.TestCase):
 
 class DynamicImportPatchTest(TestPyfakefsUnittestBase):
     def __init__(self, methodName="runTest"):
-        super(DynamicImportPatchTest, self).__init__(methodName)
+        super().__init__(methodName)
 
     def test_os_patch(self):
         import os
@@ -59,7 +60,7 @@ class DynamicImportPatchTest(TestPyfakefsUnittestBase):
     def test_pathlib_path_patch(self):
         file_path = "test.txt"
         path = pathlib.Path(file_path)
-        with path.open("w") as f:
+        with path.open("w", encoding="utf8") as f:
             f.write("test")
 
         self.assertTrue(self.fs.exists(file_path))

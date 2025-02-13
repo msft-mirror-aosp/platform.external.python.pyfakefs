@@ -15,6 +15,7 @@
 # Disable attribute errors - attributes not be found in mixin (shall be cleaned up...)
 # pytype: disable=attribute-error
 """Common helper classes used in tests, or as test class base."""
+
 import os
 import platform
 import shutil
@@ -26,7 +27,7 @@ from contextlib import contextmanager
 from unittest import mock
 
 from pyfakefs import fake_filesystem, fake_open, fake_os
-from pyfakefs.helpers import is_byte_string, to_string
+from pyfakefs.helpers import is_byte_string, to_string, is_root
 
 
 class DummyTime:
@@ -227,6 +228,12 @@ class RealFsTestMixin:
         else:
             self.set_windows_fs(False)
 
+    @staticmethod
+    def skip_root():
+        """Skips the test if run as root."""
+        if is_root():
+            raise unittest.SkipTest("Test only valid for non-root user")
+
     def skip_real_fs(self):
         """If called at test start, no real FS test is executed."""
         if self.use_real_fs():
@@ -262,32 +269,18 @@ class RealFsTestMixin:
                     "Skipping because FakeFS does not match real FS"
                 )
 
-    def symlink_can_be_tested(self, force_real_fs=False):
+    def symlink_can_be_tested(self):
         """Used to check if symlinks and hard links can be tested under
         Windows. All tests are skipped under Windows for Python versions
         not supporting links, and real tests are skipped if running without
         administrator rights.
         """
-        if not TestCase.is_windows or (not force_real_fs and not self.use_real_fs()):
-            return True
-        if TestCase.symlinks_can_be_tested is None:
-            if force_real_fs:
-                self.base_path = tempfile.mkdtemp()
-            link_path = self.make_path("link")
-            try:
-                self.os.symlink(self.base_path, link_path)
-                TestCase.symlinks_can_be_tested = True
-                self.os.remove(link_path)
-            except (OSError, NotImplementedError):
-                TestCase.symlinks_can_be_tested = False
-            if force_real_fs:
-                self.base_path = None
-        return TestCase.symlinks_can_be_tested
+        return not TestCase.is_windows or is_root()
 
-    def skip_if_symlink_not_supported(self, force_real_fs=False):
+    def skip_if_symlink_not_supported(self):
         """If called at test start, tests are skipped if symlinks are not
         supported."""
-        if not self.symlink_can_be_tested(force_real_fs):
+        if not self.symlink_can_be_tested():
             raise unittest.SkipTest("Symlinks under Windows need admin privileges")
 
     def make_path(self, *args):
@@ -305,7 +298,7 @@ class RealFsTestMixin:
         args = [to_string(arg) for arg in args]
         return self.os.path.join(self.base_path, *args)
 
-    def create_dir(self, dir_path, perm=0o777):
+    def create_dir(self, dir_path, perm=0o777, apply_umask=True):
         """Create the directory at `dir_path`, including subdirectories.
         `dir_path` shall be composed using `make_path()`.
         """
@@ -325,21 +318,34 @@ class RealFsTestMixin:
             existing_path = self.os.path.join(existing_path, component)
             self.os.mkdir(existing_path)
             self.os.chmod(existing_path, 0o777)
+        if apply_umask:
+            umask = self.os.umask(0o022)
+            perm &= ~umask
+            self.os.umask(umask)
         self.os.chmod(dir_path, perm)
 
-    def create_file(self, file_path, contents=None, encoding=None, perm=0o666):
+    def create_file(
+        self, file_path, contents=None, encoding=None, perm=0o666, apply_umask=True
+    ):
         """Create the given file at `file_path` with optional contents,
         including subdirectories. `file_path` shall be composed using
         `make_path()`.
         """
         self.create_dir(self.os.path.dirname(file_path))
         mode = "wb" if encoding is not None or is_byte_string(contents) else "w"
+        kwargs = {"mode": mode}
 
         if encoding is not None and contents is not None:
             contents = contents.encode(encoding)
-        with self.open(file_path, mode) as f:
+        if mode == "w":
+            kwargs["encoding"] = "utf8"
+        with self.open(file_path, **kwargs) as f:
             if contents is not None:
                 f.write(contents)
+        if apply_umask:
+            umask = self.os.umask(0o022)
+            perm &= ~umask
+            self.os.umask(umask)
         self.os.chmod(file_path, perm)
 
     def create_symlink(self, link_path, target_path):
@@ -354,7 +360,10 @@ class RealFsTestMixin:
         Asserts equality.
         """
         mode = "rb" if is_byte_string(contents) else "r"
-        with self.open(file_path, mode) as f:
+        kwargs = {"mode": mode}
+        if mode == "r":
+            kwargs["encoding"] = "utf8"
+        with self.open(file_path, **kwargs) as f:
             self.assertEqual(contents, f.read())
 
     def create_basepath(self):

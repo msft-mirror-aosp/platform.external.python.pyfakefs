@@ -12,9 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Faked ``os.path`` module replacement. See ``fake_filesystem`` for usage.
-"""
+"""Faked ``os.path`` module replacement. See ``fake_filesystem`` for usage."""
+
 import errno
+import functools
+import inspect
 import os
 import sys
 from stat import (
@@ -23,6 +25,7 @@ from stat import (
 )
 from types import ModuleType
 from typing import (
+    Callable,
     List,
     Optional,
     Union,
@@ -36,9 +39,11 @@ from typing import (
 )
 
 from pyfakefs.helpers import (
+    is_called_from_skipped_module,
     make_string_path,
     to_string,
     matching_string,
+    to_bytes,
 )
 
 if TYPE_CHECKING:
@@ -118,9 +123,9 @@ class FakePathModule:
     def reset(cls, filesystem: "FakeFilesystem") -> None:
         cls.sep = filesystem.path_separator
         cls.altsep = filesystem.alternative_path_separator
-        cls.linesep = filesystem.line_separator()
-        cls.devnull = "nul" if filesystem.is_windows_fs else "/dev/null"
-        cls.pathsep = ";" if filesystem.is_windows_fs else ":"
+        cls.linesep = filesystem.line_separator
+        cls.devnull = filesystem.devnull
+        cls.pathsep = filesystem.pathsep
 
     def exists(self, path: AnyStr) -> bool:
         """Determine whether the file object exists within the fake filesystem.
@@ -164,10 +169,19 @@ class FakePathModule:
 
     def isabs(self, path: AnyStr) -> bool:
         """Return True if path is an absolute pathname."""
+        empty = matching_string(path, "")
         if self.filesystem.is_windows_fs:
-            path = self.splitdrive(path)[1]
+            drive, path = self.splitdrive(path)
+        else:
+            drive = empty
         path = make_string_path(path)
-        return self.filesystem.starts_with_sep(path)
+        if not self.filesystem.starts_with_sep(path):
+            return False
+        if self.filesystem.is_windows_fs and sys.version_info >= (3, 13):
+            # from Python 3.13 on, a path under Windows starting with a single separator
+            # (e.g. not a drive and not an UNC path) is no more considered absolute
+            return drive != empty
+        return True
 
     def isdir(self, path: AnyStr) -> bool:
         """Determine if path identifies a directory."""
@@ -203,6 +217,14 @@ class FakePathModule:
             """
             return self.filesystem.splitroot(path)
 
+    if sys.version_info >= (3, 13):
+
+        def isreserved(self, path):
+            if not self.filesystem.is_windows_fs:
+                raise AttributeError("module 'os' has no attribute 'isreserved'")
+
+            return self.filesystem.isreserved(path)
+
     def getmtime(self, path: AnyStr) -> float:
         """Returns the modification time of the fake file.
 
@@ -220,7 +242,9 @@ class FakePathModule:
             file_obj = self.filesystem.resolve(path)
             return file_obj.st_mtime
         except OSError:
-            self.filesystem.raise_os_error(errno.ENOENT, winerror=3)
+            self.filesystem.raise_os_error(
+                errno.ENOENT, winerror=3
+            )  # pytype: disable=bad-return-type
 
     def getatime(self, path: AnyStr) -> float:
         """Returns the last access time of the fake file.
@@ -242,7 +266,7 @@ class FakePathModule:
             file_obj = self.filesystem.resolve(path)
         except OSError:
             self.filesystem.raise_os_error(errno.ENOENT)
-        return file_obj.st_atime
+        return file_obj.st_atime  # pytype: disable=name-error
 
     def getctime(self, path: AnyStr) -> float:
         """Returns the creation time of the fake file.
@@ -261,7 +285,7 @@ class FakePathModule:
             file_obj = self.filesystem.resolve(path)
         except OSError:
             self.filesystem.raise_os_error(errno.ENOENT)
-        return file_obj.st_ctime
+        return file_obj.st_ctime  # pytype: disable=name-error
 
     def abspath(self, path: AnyStr) -> AnyStr:
         """Return the absolute version of a path."""
@@ -336,7 +360,7 @@ class FakePathModule:
         symbolic links encountered in the path.
         """
         if strict is not None and sys.version_info < (3, 10):
-            raise TypeError("realpath() got an unexpected " "keyword argument 'strict'")
+            raise TypeError("realpath() got an unexpected keyword argument 'strict'")
         if strict:
             # raises in strict mode if the file does not exist
             self.filesystem.resolve(filename)
@@ -351,8 +375,8 @@ class FakePathModule:
         """Return whether path1 and path2 point to the same file.
 
         Args:
-            path1: first file path or path object (Python >=3.6)
-            path2: second file path or path object (Python >=3.6)
+            path1: first file path or path object
+            path2: second file path or path object
 
         Raises:
             OSError: if one of the paths does not point to an existing
@@ -365,14 +389,12 @@ class FakePathModule:
     @overload
     def _join_real_path(
         self, path: str, rest: str, seen: Dict[str, Optional[str]]
-    ) -> Tuple[str, bool]:
-        ...
+    ) -> Tuple[str, bool]: ...
 
     @overload
     def _join_real_path(
         self, path: bytes, rest: bytes, seen: Dict[bytes, Optional[bytes]]
-    ) -> Tuple[bytes, bool]:
-        ...
+    ) -> Tuple[bytes, bool]: ...
 
     def _join_real_path(
         self, path: AnyStr, rest: AnyStr, seen: Dict[AnyStr, Optional[AnyStr]]
@@ -505,6 +527,14 @@ if sys.platform == "win32":
             self.filesystem = filesystem
             self.nt_module: Any = nt
 
+        def getcwd(self) -> str:
+            """Return current working directory."""
+            return to_string(self.filesystem.cwd)
+
+        def getcwdb(self) -> bytes:
+            """Return current working directory as bytes."""
+            return to_bytes(self.filesystem.cwd)
+
         if sys.version_info >= (3, 12):
 
             def _path_isdir(self, path: AnyStr) -> bool:
@@ -527,3 +557,37 @@ if sys.platform == "win32":
         def __getattr__(self, name: str) -> Any:
             """Forwards any non-faked calls to the real nt module."""
             return getattr(self.nt_module, name)
+
+
+def handle_original_call(f: Callable) -> Callable:
+    """Decorator used for real pathlib Path methods to ensure that
+    real os functions instead of faked ones are used.
+    Applied to all non-private methods of `FakePathModule`."""
+
+    @functools.wraps(f)
+    def wrapped(*args, **kwargs):
+        if args:
+            self = args[0]
+            should_use_original = self.os.use_original
+            if not should_use_original and self.filesystem.patcher:
+                skip_names = self.filesystem.patcher.skip_names
+                if is_called_from_skipped_module(
+                    skip_names=skip_names,
+                    case_sensitive=self.filesystem.is_case_sensitive,
+                ):
+                    should_use_original = True
+
+            if should_use_original:
+                # remove the `self` argument for FakePathModule methods
+                if args and isinstance(args[0], FakePathModule):
+                    args = args[1:]
+                return getattr(os.path, f.__name__)(*args, **kwargs)
+
+        return f(*args, **kwargs)
+
+    return wrapped
+
+
+for name, fn in inspect.getmembers(FakePathModule, inspect.isfunction):
+    if not fn.__name__.startswith("_"):
+        setattr(FakePathModule, name, handle_original_call(fn))

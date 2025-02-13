@@ -17,6 +17,7 @@
 Note that almost all of the functionality is delegated to the real `shutil`
 and works correctly with the fake filesystem because of the faked `os` module.
 """
+
 import os
 import shutil
 import sys
@@ -137,7 +138,7 @@ class FakeShutilModuleTest(RealFsTestCase):
         self.create_file(os.path.join(dir_path, "bar"))
         file_path = os.path.join(dir_path, "baz")
         self.create_file(file_path)
-        with open(file_path):
+        with open(file_path, encoding="utf8"):
             shutil.rmtree(dir_path)
         self.assertFalse(os.path.exists(file_path))
 
@@ -148,7 +149,7 @@ class FakeShutilModuleTest(RealFsTestCase):
         self.create_file(os.path.join(dir_path, "bar"))
         file_path = os.path.join(dir_path, "baz")
         self.create_file(file_path)
-        with open(file_path):
+        with open(file_path, encoding="utf8"):
             with self.assertRaises(OSError):
                 shutil.rmtree(dir_path)
         self.assertTrue(os.path.exists(dir_path))
@@ -191,6 +192,15 @@ class FakeShutilModuleTest(RealFsTestCase):
         self.assertFalse(NonLocal.errorHandled)
         self.assertEqual(NonLocal.errorPath, "")
 
+    def test_rmtree_in_windows(self):
+        # regression test for #979
+        self.check_windows_only()
+        base_path = self.make_path("foo", "bar")
+        self.os.makedirs(self.os.path.join(base_path, "res"))
+        self.assertTrue(self.os.path.exists(base_path))
+        shutil.rmtree(base_path)
+        self.assertFalse(self.os.path.exists(base_path))
+
     def test_copy(self):
         src_file = self.make_path("xyzzy")
         dst_file = self.make_path("xyzzy_copy")
@@ -228,7 +238,7 @@ class FakeShutilModuleTest(RealFsTestCase):
         src_stat = os.stat(src_file)
         dst_stat = os.stat(dst_file)
         self.assertEqual(src_stat.st_mode, dst_stat.st_mode)
-        self.assertAlmostEqual(src_stat.st_atime, dst_stat.st_atime, places=2)
+        self.assertAlmostEqual(src_stat.st_atime, dst_stat.st_atime, places=0)
         self.assertAlmostEqual(src_stat.st_mtime, dst_stat.st_mtime, places=2)
 
     @unittest.skipIf(IS_PYPY, "Functionality not supported in PyPy")
@@ -255,7 +265,7 @@ class FakeShutilModuleTest(RealFsTestCase):
         src_stat = os.stat(src_file)
         dst_stat = os.stat(dst_file)
         self.assertEqual(src_stat.st_mode, dst_stat.st_mode)
-        self.assertAlmostEqual(src_stat.st_atime, dst_stat.st_atime, places=2)
+        self.assertAlmostEqual(src_stat.st_atime, dst_stat.st_atime, places=0)
         self.assertAlmostEqual(src_stat.st_mtime, dst_stat.st_mtime, places=2)
 
     def test_copy2_directory(self):
@@ -273,7 +283,7 @@ class FakeShutilModuleTest(RealFsTestCase):
         src_stat = os.stat(src_file)
         dst_stat = os.stat(dst_file)
         self.assertEqual(src_stat.st_mode, dst_stat.st_mode)
-        self.assertAlmostEqual(src_stat.st_atime, dst_stat.st_atime, places=2)
+        self.assertAlmostEqual(src_stat.st_atime, dst_stat.st_atime, places=0)
         self.assertAlmostEqual(src_stat.st_mtime, dst_stat.st_mtime, places=2)
 
     def test_copytree(self):
@@ -401,7 +411,7 @@ class RealShutilModuleTest(FakeShutilModuleTest):
 
 class FakeCopyFileTest(RealFsTestCase):
     def tearDown(self):
-        super(FakeCopyFileTest, self).tearDown()
+        super().tearDown()
 
     def test_common_case(self):
         src_file = self.make_path("xyzzy")
