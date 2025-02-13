@@ -17,7 +17,9 @@
 """
 Test the :py:class`pyfakefs.fake_filesystem_unittest.TestCase` base class.
 """
+
 import glob
+import importlib.util
 import io
 import multiprocessing
 import os
@@ -28,6 +30,8 @@ import sys
 import tempfile
 import unittest
 import warnings
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 from unittest import TestCase, mock
 
@@ -48,18 +52,22 @@ if sys.version_info < (3, 12):
     from distutils.dir_util import copy_tree, remove_tree
 
 
+# Work around pyupgrade auto-rewriting `io.open()` to `open()`.
+io_open = io.open
+
+
 class TestPatcher(TestCase):
     def test_context_manager(self):
         with Patcher() as patcher:
             patcher.fs.create_file("/foo/bar", contents="test")
-            with open("/foo/bar") as f:
+            with open("/foo/bar", encoding="utf8") as f:
                 contents = f.read()
             self.assertEqual("test", contents)
 
     @patchfs
     def test_context_decorator(self, fake_fs):
         fake_fs.create_file("/foo/bar", contents="test")
-        with open("/foo/bar") as f:
+        with open("/foo/bar", encoding="utf8") as f:
             contents = f.read()
         self.assertEqual("test", contents)
 
@@ -69,7 +77,7 @@ class TestPatchfsArgumentOrder(TestCase):
     @mock.patch("os.system")
     def test_argument_order1(self, fake_fs, patched_system):
         fake_fs.create_file("/foo/bar", contents="test")
-        with open("/foo/bar") as f:
+        with open("/foo/bar", encoding="utf8") as f:
             contents = f.read()
         self.assertEqual("test", contents)
         os.system("foo")
@@ -79,7 +87,7 @@ class TestPatchfsArgumentOrder(TestCase):
     @patchfs
     def test_argument_order2(self, patched_system, fake_fs):
         fake_fs.create_file("/foo/bar", contents="test")
-        with open("/foo/bar") as f:
+        with open("/foo/bar", encoding="utf8") as f:
             contents = f.read()
         self.assertEqual("test", contents)
         os.system("foo")
@@ -98,26 +106,26 @@ class TestPyfakefsUnittest(TestPyfakefsUnittestBase):  # pylint: disable=R0904
     def test_open(self):
         """Fake `open()` function is bound"""
         self.assertFalse(os.path.exists("/fake_file.txt"))
-        with open("/fake_file.txt", "w") as f:
+        with open("/fake_file.txt", "w", encoding="utf8") as f:
             f.write("This test file was created using the open() function.\n")
         self.assertTrue(self.fs.exists("/fake_file.txt"))
-        with open("/fake_file.txt") as f:
+        with open("/fake_file.txt", encoding="utf8") as f:
             content = f.read()
         self.assertEqual(
-            "This test file was created using the " "open() function.\n",
+            "This test file was created using the open() function.\n",
             content,
         )
 
     def test_io_open(self):
         """Fake io module is bound"""
         self.assertFalse(os.path.exists("/fake_file.txt"))
-        with io.open("/fake_file.txt", "w") as f:
-            f.write("This test file was created using the" " io.open() function.\n")
+        with io_open("/fake_file.txt", "w", encoding="utf8") as f:
+            f.write("This test file was created using the io.open() function.\n")
         self.assertTrue(self.fs.exists("/fake_file.txt"))
-        with open("/fake_file.txt") as f:
+        with open("/fake_file.txt", encoding="utf8") as f:
             content = f.read()
         self.assertEqual(
-            "This test file was created using the " "io.open() function.\n",
+            "This test file was created using the io.open() function.\n",
             content,
         )
 
@@ -156,7 +164,7 @@ class TestPyfakefsUnittest(TestPyfakefsUnittestBase):  # pylint: disable=R0904
 
     def test_fakepathlib(self):
         p = pathlib.Path("/fake_file.txt")
-        with p.open("w") as f:
+        with p.open("w", encoding="utf8") as f:
             f.write("text")
         is_windows = sys.platform.startswith("win")
         if is_windows:
@@ -228,14 +236,12 @@ class TestPatchingImports(TestPyfakefsUnittestBase):
         stat_result = pyfakefs.tests.import_as_example.file_stat2(file_path)
         self.assertEqual(3, stat_result.st_size)
 
-    @unittest.skipIf(sys.version_info >= (3, 12), "Currently not working in 3.12")
     def test_import_open_as_other_name(self):
         file_path = "/foo/bar"
         self.fs.create_file(file_path, contents=b"abc")
         contents = pyfakefs.tests.import_as_example.file_contents1(file_path)
         self.assertEqual("abc", contents)
 
-    @unittest.skipIf(sys.version_info >= (3, 12), "Currently not working in 3.12")
     def test_import_io_open_as_other_name(self):
         file_path = "/foo/bar"
         self.fs.create_file(file_path, contents=b"abc")
@@ -398,10 +404,6 @@ class AdditionalSkipNamesTest(fake_filesystem_unittest.TestCase):
         self.fs.create_file("foo")
         self.assertFalse(pyfakefs.tests.import_as_example.check_if_exists7("foo"))
 
-    @unittest.skipIf(
-        sys.version_info >= (3, 12),
-        "Skip modules currently not working for open in 3.12",
-    )
     def test_open_succeeds(self):
         pyfakefs.tests.import_as_example.open_this_file()
 
@@ -447,15 +449,41 @@ class AdditionalSkipNamesModuleTest(fake_filesystem_unittest.TestCase):
         self.fs.create_file("foo")
         self.assertFalse(pyfakefs.tests.import_as_example.check_if_exists7("foo"))
 
-    @unittest.skipIf(
-        sys.version_info >= (3, 12),
-        "Skip modules currently not working for open in 3.12",
-    )
     def test_open_succeeds(self):
         pyfakefs.tests.import_as_example.open_this_file()
 
     def test_path_succeeds(self):
         pyfakefs.tests.import_as_example.return_this_file_path()
+
+
+class RuntimeSkipModuleTest(fake_filesystem_unittest.TestCase):
+    """Emulates skipping a module using RUNTIME_SKIPMODULES.
+    Not all functionality implemented for skip modules will work here."""
+
+    def setUp(self):
+        Patcher.RUNTIME_SKIPMODULES.update(
+            {"pyfakefs.tests.import_as_example": ["pyfakefs.tests.import_"]}
+        )
+        self.setUpPyfakefs()
+
+    def tearDown(self):
+        del self.patcher.RUNTIME_SKIPMODULES["pyfakefs.tests.import_as_example"]
+
+    def test_fake_path_does_not_exist1(self):
+        self.fs.create_file("foo")
+        self.assertFalse(pyfakefs.tests.import_as_example.check_if_exists1("foo"))
+
+    def test_fake_path_does_not_exist2(self):
+        self.fs.create_file("foo")
+        self.assertFalse(pyfakefs.tests.import_as_example.check_if_exists2("foo"))
+
+    def test_fake_path_does_not_exist3(self):
+        self.fs.create_file("foo")
+        self.assertFalse(pyfakefs.tests.import_as_example.check_if_exists3("foo"))
+
+    def test_fake_path_does_not_exist4(self):
+        self.fs.create_file("foo")
+        self.assertFalse(pyfakefs.tests.import_as_example.check_if_exists4("foo"))
 
 
 class FakeExampleModule:
@@ -538,17 +566,12 @@ class NoRootUserTest(fake_filesystem_unittest.TestCase):
         self.fs.create_file(file_path)
         os.chmod(file_path, 0o400)
         with self.assertRaises(OSError):
-            open(file_path, "w")
+            open(file_path, "w", encoding="utf8")
 
 
 class PauseResumeTest(fake_filesystem_unittest.TestCase):
     def setUp(self):
-        self.real_temp_file = None
         self.setUpPyfakefs()
-
-    def tearDown(self):
-        if self.real_temp_file is not None:
-            self.real_temp_file.close()
 
     def test_pause_resume(self):
         fake_temp_file = tempfile.NamedTemporaryFile()
@@ -557,11 +580,11 @@ class PauseResumeTest(fake_filesystem_unittest.TestCase):
         self.pause()
         self.assertTrue(self.fs.exists(fake_temp_file.name))
         self.assertFalse(os.path.exists(fake_temp_file.name))
-        self.real_temp_file = tempfile.NamedTemporaryFile()
-        self.assertFalse(self.fs.exists(self.real_temp_file.name))
-        self.assertTrue(os.path.exists(self.real_temp_file.name))
+        real_temp_file = tempfile.NamedTemporaryFile()
+        self.assertFalse(self.fs.exists(real_temp_file.name))
+        self.assertTrue(os.path.exists(real_temp_file.name))
         self.resume()
-        self.assertFalse(os.path.exists(self.real_temp_file.name))
+        self.assertFalse(os.path.exists(real_temp_file.name))
         self.assertTrue(os.path.exists(fake_temp_file.name))
 
     def test_pause_resume_fs(self):
@@ -574,15 +597,15 @@ class PauseResumeTest(fake_filesystem_unittest.TestCase):
         self.fs.pause()
         self.assertTrue(self.fs.exists(fake_temp_file.name))
         self.assertFalse(os.path.exists(fake_temp_file.name))
-        self.real_temp_file = tempfile.NamedTemporaryFile()
-        self.assertFalse(self.fs.exists(self.real_temp_file.name))
-        self.assertTrue(os.path.exists(self.real_temp_file.name))
+        real_temp_file = tempfile.NamedTemporaryFile()
+        self.assertFalse(self.fs.exists(real_temp_file.name))
+        self.assertTrue(os.path.exists(real_temp_file.name))
         # pause does nothing if already paused
         self.fs.pause()
-        self.assertFalse(self.fs.exists(self.real_temp_file.name))
-        self.assertTrue(os.path.exists(self.real_temp_file.name))
+        self.assertFalse(self.fs.exists(real_temp_file.name))
+        self.assertTrue(os.path.exists(real_temp_file.name))
         self.fs.resume()
-        self.assertFalse(os.path.exists(self.real_temp_file.name))
+        self.assertFalse(os.path.exists(real_temp_file.name))
         self.assertTrue(os.path.exists(fake_temp_file.name))
 
     def test_pause_resume_contextmanager(self):
@@ -592,10 +615,10 @@ class PauseResumeTest(fake_filesystem_unittest.TestCase):
         with Pause(self):
             self.assertTrue(self.fs.exists(fake_temp_file.name))
             self.assertFalse(os.path.exists(fake_temp_file.name))
-            self.real_temp_file = tempfile.NamedTemporaryFile()
-            self.assertFalse(self.fs.exists(self.real_temp_file.name))
-            self.assertTrue(os.path.exists(self.real_temp_file.name))
-        self.assertFalse(os.path.exists(self.real_temp_file.name))
+            real_temp_file = tempfile.NamedTemporaryFile()
+            self.assertFalse(self.fs.exists(real_temp_file.name))
+            self.assertTrue(os.path.exists(real_temp_file.name))
+        self.assertFalse(os.path.exists(real_temp_file.name))
         self.assertTrue(os.path.exists(fake_temp_file.name))
 
     def test_pause_resume_fs_contextmanager(self):
@@ -605,16 +628,23 @@ class PauseResumeTest(fake_filesystem_unittest.TestCase):
         with Pause(self.fs):
             self.assertTrue(self.fs.exists(fake_temp_file.name))
             self.assertFalse(os.path.exists(fake_temp_file.name))
-            self.real_temp_file = tempfile.NamedTemporaryFile()
-            self.assertFalse(self.fs.exists(self.real_temp_file.name))
-            self.assertTrue(os.path.exists(self.real_temp_file.name))
-        self.assertFalse(os.path.exists(self.real_temp_file.name))
+            real_temp_file = tempfile.NamedTemporaryFile()
+            self.assertFalse(self.fs.exists(real_temp_file.name))
+            self.assertTrue(os.path.exists(real_temp_file.name))
+        self.assertFalse(os.path.exists(real_temp_file.name))
         self.assertTrue(os.path.exists(fake_temp_file.name))
 
     def test_pause_resume_without_patcher(self):
         fs = fake_filesystem.FakeFilesystem()
         with self.assertRaises(RuntimeError):
             fs.resume()
+
+    def test_that_tempfile_is_patched_after_resume(fs):
+        """Regression test for #1098"""
+        fs.pause()
+        fs.resume()
+        with tempfile.NamedTemporaryFile():
+            pass
 
 
 class PauseResumePatcherTest(fake_filesystem_unittest.TestCase):
@@ -761,10 +791,6 @@ class PathlibTest(TestCase):
 
 
 class TestDeprecationSuppression(fake_filesystem_unittest.TestCase):
-    @unittest.skipIf(
-        sys.version_info[1] == 6,
-        "Test fails for Python 3.6 for unknown reason",
-    )
     def test_no_deprecation_warning(self):
         """Ensures that deprecation warnings are suppressed during module
         lookup, see #542.
@@ -791,6 +817,7 @@ def load_configs(configs):
     return retval
 
 
+@unittest.skipIf(sys.version_info < (3, 8), "open_code new in Python 3.8")
 class AutoPatchOpenCodeTestCase(fake_filesystem_unittest.TestCase):
     """Test patching open_code in auto mode, see issue #554."""
 
@@ -810,6 +837,17 @@ class AutoPatchOpenCodeTestCase(fake_filesystem_unittest.TestCase):
     def test_run_module(self):
         load_configs([self.config_module])
 
+    def import_foo(self):
+        spec = importlib.util.spec_from_file_location("bar", "/foo/bar.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+    def test_exec_module_in_fake_fs(self):
+        self.fs.create_file("/foo/bar.py", contents="print('hello')")
+        with redirect_stdout(StringIO()) as stdout:
+            self.import_foo()
+        assert stdout.getvalue() == "hello\n"
+
 
 class TestOtherFS(fake_filesystem_unittest.TestCase):
     def setUp(self):
@@ -822,11 +860,11 @@ class TestOtherFS(fake_filesystem_unittest.TestCase):
         if self.fs.is_windows_fs:
             self.fs.is_macos = False
         self.fs.add_real_file(__file__)
-        with open(__file__) as f:
+        with open(__file__, encoding="utf8") as f:
             self.assertTrue(f.read())
         home = Path.home()
         os.chdir(home)
-        with open(__file__) as f:
+        with open(__file__, encoding="utf8") as f:
             self.assertTrue(f.read())
 
     def test_windows(self):
@@ -844,7 +882,7 @@ class TestOtherFS(fake_filesystem_unittest.TestCase):
         self.assertEqual("/", os.altsep)
         self.assertEqual(";", os.pathsep)
         self.assertEqual("\r\n", os.linesep)
-        self.assertEqual("nul", os.devnull)
+        self.assertEqual("NUL", os.devnull)
 
     def test_linux(self):
         self.fs.os = OSType.LINUX
@@ -889,6 +927,13 @@ class TestOtherFS(fake_filesystem_unittest.TestCase):
         os.chdir(folder)
         self.assertTrue(os.path.exists(str(file_path.relative_to(folder))))
 
+    @unittest.skipIf(sys.platform != "win32", "Windows-specific test")
+    def test_tempfile_access(self):
+        # regression test for #912
+        self.fs.os = OSType.LINUX
+        tmp_file = tempfile.TemporaryFile()
+        assert tmp_file
+
 
 @unittest.skipIf(sys.platform != "win32", "Windows-specific behavior")
 class TestAbsolutePathOnWindows(fake_filesystem_unittest.TestCase):
@@ -907,7 +952,7 @@ class TestClassSetup(fake_filesystem_unittest.TestCase):
 
     def test_using_fs_functions(self):
         self.assertTrue(os.path.exists("foo/bar"))
-        with open("foo/bar") as f:
+        with open("foo/bar", encoding="utf8") as f:
             contents = f.read()
         self.assertEqual("test", contents)
 
@@ -915,6 +960,69 @@ class TestClassSetup(fake_filesystem_unittest.TestCase):
         self.assertTrue(self.fs.exists("foo/bar"))
         f = self.fs.get_object("foo/bar")
         self.assertEqual("test", f.contents)
+
+
+class TestTempPathCreation(fake_filesystem_unittest.TestCase):
+    """Regression test for #965. Checks that the temp file system
+    is properly created with a root-owned root path.
+    """
+
+    def setUp(self):
+        self.setUpPyfakefs()
+
+    def check_write_tmp_after_reset(self, os_type):
+        self.fs.os = os_type
+        # Mark '/' to be modifiable by only root
+        os.chown("/", 0, 0)
+        os.chmod("/", 0b111_101_101)
+        with tempfile.TemporaryFile("wb") as f:
+            assert f.write(b"foo") == 3
+
+    def test_write_tmp_linux(self):
+        self.check_write_tmp_after_reset(OSType.LINUX)
+
+    def test_write_tmp_macos(self):
+        self.check_write_tmp_after_reset(OSType.MACOS)
+
+    def test_write_tmp_windows(self):
+        self.check_write_tmp_after_reset(OSType.WINDOWS)
+
+
+@unittest.skipIf(sys.version_info < (3, 8), "Not available before Python 3.8")
+class FakeImportTest(fake_filesystem_unittest.TestCase):
+    """Checks that a fake module can be imported in AUTO patch mode."""
+
+    def setUp(self):
+        self.setUpPyfakefs(patch_open_code=PatchMode.AUTO)
+
+    def test_simple_fake_import(self):
+        fake_module_path = Path("/") / "site-packages" / "fake_module.py"
+        self.fs.create_file(fake_module_path, contents="number = 42")
+        sys.path.insert(0, str(fake_module_path.parent))
+        module = importlib.import_module("fake_module")
+        del sys.path[0]
+        assert module.__name__ == "fake_module"
+        assert module.number == 42
+
+    def test_fake_import_dotted_module(self):
+        fake_pkg_path = Path("/") / "site-packages"
+        self.fs.create_file(fake_pkg_path / "fakepkg" / "__init__.py")
+        fake_module_path = fake_pkg_path / "fakepkg" / "fake_module.py"
+        self.fs.create_file(fake_module_path, contents="number = 42")
+        sys.path.insert(0, str(fake_pkg_path))
+        module = importlib.import_module("fakepkg.fake_module")
+        del sys.path[0]
+        assert module.__name__ == "fakepkg.fake_module"
+        assert module.number == 42
+
+    def test_fake_relative_import(self):
+        fake_module_path = Path("site-packages") / "fake_module.py"
+        self.fs.create_file(fake_module_path, contents="number = 42")
+        sys.path.insert(0, str(fake_module_path.parent))
+        module = importlib.import_module("fake_module")
+        del sys.path[0]
+        assert module.__name__ == "fake_module"
+        assert module.number == 42
 
 
 if __name__ == "__main__":
